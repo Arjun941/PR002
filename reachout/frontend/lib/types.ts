@@ -36,12 +36,20 @@ export type Kind = "seminar" | "clinic" | "school" | "payment";
 export type TextProvider = "template" | "chatgpt" | "ollama" | "sarvam";
 export type VoiceProvider = "piper" | "sarvam" | "elevenlabs";
 export interface Provider { key: string; label: string; region: string; sends: string; available?: boolean; live?: boolean }
+export interface AgentProvider { key: string; label: string; region: string; sends: string; setup: string; available: boolean }
+export interface ProviderItem {
+  key: string; label: string; region: string; sends: string; available: boolean; setup: string;
+  default?: boolean; model?: string | null; checkable?: boolean; live?: boolean;
+}
+export interface ProviderGroup { key: string; title: string; help: string; items: ProviderItem[] }
+export interface GeminiCheck { ok: boolean; model: string; connect_ms?: number; first_audio_ms?: number; error?: string }
 export interface ChatGPTStatus { connected: boolean; email: string | null; redirect_uri: string }
 export interface BuilderOptions {
   languages: { code: string; name: string }[];
   kinds: { value: Kind; label: string }[];
   text_providers: Provider[]; voice_providers: Provider[]; chatgpt: ChatGPTStatus;
   escalation: { available: boolean; label: string; sends: string };
+  agent_providers: AgentProvider[]; default_agent: string;
   launch_mode: "live" | "simulated" | "unavailable";
   call_window: string;
 }

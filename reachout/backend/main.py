@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from . import assistant, audio, chatgpt, demo, dialer, exotel, store
 from .builder import DEMO, router as builder_router
 from .costs import RETRY_ESTIMATE_PER_CALL, recipient_cost
+from .providers import router as providers_router
 from .recordings import router as recordings_router
 from .store import ANSWERED, LANGUAGES, NON_RESPONDER, OUTCOMES
 from .voicebot import router as voicebot_router
@@ -109,6 +110,7 @@ app.include_router(chatgpt.router)
 app.include_router(assistant.router)
 app.include_router(dialer.router)
 app.include_router(recordings_router)
+app.include_router(providers_router)
 
 
 @app.get("/api/overview")

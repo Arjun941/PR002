@@ -20,7 +20,7 @@ from flask_sock import Sock
 from google import genai
 from google.genai import types
 
-MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview")
+MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-3.8-live")
 PROMPT = ("You are Reachout's test voice assistant. Greet the user briefly, then answer in one or two "
           "short sentences. Match the user's language.")
 

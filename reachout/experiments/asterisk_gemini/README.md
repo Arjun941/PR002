@@ -15,7 +15,7 @@ set GEMINI_API_KEY=...          # PowerShell: $env:GEMINI_API_KEY="..."
 python bridge.py --local        # use headphones, otherwise it hears itself
 ```
 
-`GEMINI_LIVE_MODEL` overrides the model (default `gemini-3.1-flash-live-preview`; names change often).
+`GEMINI_LIVE_MODEL` overrides the model (default `gemini-3.8-live`; names change often).
 
 Or use the browser UI: `python web_ui.py`, open http://localhost:5000, click Start (mic + live transcript).
 

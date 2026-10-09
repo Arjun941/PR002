@@ -4,3 +4,4 @@ httpx>=0.27
 python-dotenv>=1.0
 pyjwt[crypto]>=2.8
 websockets>=13
+google-genai>=2.19

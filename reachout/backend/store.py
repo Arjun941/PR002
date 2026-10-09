@@ -71,7 +71,7 @@ def tx() -> Iterator[sqlite3.Connection]:
 
 # Columns added after the first release; init() adds them to older databases.
 _ADDED = {"campaigns": [("voice", "TEXT NOT NULL DEFAULT ''"), ("audio_ready", "INTEGER NOT NULL DEFAULT 0"),
-                        ("note", "TEXT")]}
+                        ("note", "TEXT"), ("agent_provider", "TEXT NOT NULL DEFAULT 'elevenlabs'")]}
 
 
 def init() -> None:

@@ -72,6 +72,13 @@ reminders). Telephony is Exotel (access provided at kickoff).
   (`/ws/exotel`: plays tones, reads DTMF back as beeps). Exotel API/event/audio-format details were
   written from memory and are UNVERIFIED; check them on the first real call. Copy `.env.example` to `.env`.
 
+- Live assistant on key 4 is pluggable (`backend/agents.py`): Gemini Live (`backend/gemini_live.py`, default model
+  gemini-3.8-live, `GEMINI_API_KEY`) or the ElevenLabs agent. Chosen per campaign (`agent_provider`), default via
+  `LIVE_AGENT`. Providers page (`/providers`, `backend/providers.py`) lists every provider and tests Gemini Live.
+  ElevenLabs agent is created by `python -m backend.setup_elevenagent` (writes ELEVENLABS_AGENT_ID/VOICE_ID to .env).
+  Both assistants verified with a fake telephony line; not yet on a real Exotel call. Other Gemini Live models misbehaved in tests
+  (3.1 preview closed sessions with 1011, 2.5 native audio took 7-14 s to reply).
+
 ## Roadmap
 
 - [~] Phase 1 (code written, untested against real Exotel: needs credentials, Cloudflare Tunnel, a flow with the voicebot applet): Exotel skeleton. Outbound call via API to a test number, voicebot/stream applet to

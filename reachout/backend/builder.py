@@ -15,7 +15,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from . import audio, chatgpt, costs, dialer, elevenlabs, llm, store
+from . import agents, audio, chatgpt, costs, dialer, llm, store
 from .store import LANGUAGES, now_iso
 
 router = APIRouter(prefix="/api")
@@ -55,6 +55,7 @@ class DraftReq(BaseModel):
     languages: list[str] = Field(min_length=1)
     text_provider: Literal["template", "chatgpt", "ollama", "sarvam"] = "template"
     escalation: bool = True
+    agent_provider: str = ""
 
 
 class ContactsReq(BaseModel):
@@ -71,6 +72,7 @@ class EstimateReq(BaseModel):
     record: bool
     voice_provider: Literal["piper", "sarvam", "elevenlabs"]
     text_provider: Literal["template", "chatgpt", "ollama", "sarvam"]
+    agent_provider: str = ""
 
 
 class CreateReq(BaseModel):
@@ -80,6 +82,7 @@ class CreateReq(BaseModel):
     text_provider: Literal["template", "chatgpt", "ollama", "sarvam"]
     voice_provider: Literal["piper", "sarvam", "elevenlabs"]
     escalation: bool
+    agent_provider: str = ""
     record: bool
     contacts_csv: str = Field(max_length=1_000_000)
     scripts: dict[str, Script]
@@ -95,8 +98,18 @@ def _check_langs(langs: list[str]) -> list[str]:
 
 
 def escalation_ready() -> bool:
-    """Key 4 runs on the ElevenLabs agent; without it campaigns are keypad only."""
-    return elevenlabs.agent_ready()
+    """Key 4 needs a live assistant (Gemini Live or ElevenLabs); without one campaigns are keypad only."""
+    return agents.any_ready()
+
+
+def pick_agent(requested: str) -> str:
+    """The requested live assistant, or the default; 400 if it is unknown or not configured."""
+    key = requested or agents.default()
+    if key not in agents.PROVIDERS:
+        raise HTTPException(400, f"Unknown live assistant: {key}")
+    if not agents.ready(key):
+        raise HTTPException(400, f"{agents.PROVIDERS[key]['label']} is not set up (set {agents.PROVIDERS[key]['setup']})")
+    return key
 
 
 def launch_mode() -> str:
@@ -172,8 +185,10 @@ def options():
                            for k, v in llm.TEXT_PROVIDERS.items()],
         # Only providers that can synthesise call audio can launch real calls; any can be simulated.
         "voice_providers": [{"key": k, **v, "available": audio.ready(k)} for k, v in llm.VOICE_PROVIDERS.items()],
-        "escalation": {"available": escalation_ready(), "label": "ElevenLabs agent",
-                       "sends": "Callers who press 4: their voice goes to ElevenLabs, USA"},
+        "escalation": {"available": escalation_ready(), "label": agents.PROVIDERS[agents.default()]["label"],
+                       "sends": agents.PROVIDERS[agents.default()]["sends"]},
+        "agent_providers": [{"key": k, **v, "available": agents.ready(k)} for k, v in agents.PROVIDERS.items()],
+        "default_agent": agents.default(),
         "chatgpt": chatgpt.status(),
         "launch_mode": launch_mode(),
         "call_window": os.getenv("CALL_WINDOW", "09:00-20:00"),
@@ -211,15 +226,17 @@ def estimate(body: EstimateReq):
                           scripts={l: s.model_dump() for l, s in body.scripts.items()},
                           max_attempts=body.retry.max_attempts, escalation=escalation,
                           voice=body.voice_provider, text=body.text_provider) | {
-        "handling": handling(body.voice_provider, body.text_provider, escalation, body.record)}
+        "handling": handling(body.voice_provider, body.text_provider, escalation, body.record,
+                             pick_agent(body.agent_provider) if escalation else "")}
 
 
-def handling(voice: str, text: str, escalation: bool, record: bool) -> dict:
+def handling(voice: str, text: str, escalation: bool, record: bool, agent: str = "") -> dict:
     v = llm.VOICE_PROVIDERS[voice]
     return {
         "audio": {"provider": v["label"], "note": v["sends"]},
-        "text": ({"provider": "ElevenLabs agent", "note": "Only callers who press 4; their voice goes to ElevenLabs, USA"}
-                 if escalation else {"provider": "Keypad only", "note": "No speech is processed"}),
+        "text": ({"provider": agents.PROVIDERS[agent]["label"],
+                  "note": "Only callers who press 4; their voice goes to " + agents.PROVIDERS[agent]["region"]}
+                 if escalation and agent else {"provider": "Keypad only", "note": "No speech is processed"}),
         "recordings": ({"provider": "Exotel", "note": "Stored in India, played back only after unlocking"}
                        if record else {"provider": "Not recorded", "note": "No call audio is kept"}),
     }
@@ -250,15 +267,16 @@ def create(body: CreateReq):
     cid = f"{slug}-{secrets.token_hex(3)}"
     # Escalation needs the agent at call time; keypad-only campaigns never run one.
     escalation = body.escalation and escalation_ready()
+    agent = pick_agent(body.agent_provider) if escalation else agents.default()
     c = {
         # Live campaigns synthesise their audio first (audio.py moves them to running).
         "id": cid, "name": body.name.strip(), "kind": body.event.kind,
         "status": "preparing" if mode == "live" else "running", "voice": body.voice_provider,
         "languages": langs, "segments": list(dict.fromkeys(r["segment"] for r in rows)), "started_at": now_iso(),
-        "handling": handling(body.voice_provider, body.text_provider, escalation, body.record),
+        "handling": handling(body.voice_provider, body.text_provider, escalation, body.record, agent if escalation else ""),
         "event": body.event.model_dump(),
         "scripts": {l: body.scripts[l].model_dump() for l in langs}, "retry": body.retry.model_dump(),
-        "record": int(body.record), "escalation": int(escalation), "simulated": int(mode == "simulated"),
+        "record": int(body.record), "escalation": int(escalation), "agent_provider": agent, "simulated": int(mode == "simulated"),
     }
     recs = [{
         "id": f"{cid}-{i}", "campaign_id": cid, "name": r["name"], "phone": r["phone"], "language": r["language"],

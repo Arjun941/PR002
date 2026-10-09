@@ -24,7 +24,7 @@ from contextlib import suppress
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from . import audio, elevenlabs, store
+from . import agents, audio, store
 from .dialer import record_dtmf, record_outcome
 from .exotel import mask
 from .store import LANGUAGES
@@ -93,15 +93,16 @@ class Line:
 
 
 async def _escalate(line: Line, c: dict, r: dict) -> bool:
-    """Caller pressed 4: talk to the ElevenLabs agent. False if the agent could not be reached."""
+    """Caller pressed 4: talk to the campaign's live assistant (Gemini Live or ElevenLabs). False if it could not be reached."""
     e = c["event"]
     variables = {"org": e.get("org", ""), "title": e.get("title", ""), "venue": e.get("venue", ""),
                  "when": " at ".join(x for x in (e.get("date", ""), e.get("time", "")) if x),
                  "details": e.get("details", ""), "language": LANGUAGES.get(r["language"], r["language"])}
+    provider = c.get("agent_provider") or "elevenlabs"
     record_outcome(line.call_sid, None, "agent")
-    log.info("call %s: handing over to the voice agent", line.call_sid)
+    log.info("call %s: handing over to the %s assistant", line.call_sid, provider)
     try:
-        await elevenlabs.bridge(line.recv, line.send, line.clear, variables, r["language"],
+        await agents.bridge(provider)(line.recv, line.send, line.clear, variables, r["language"],
                                 lambda outcome: record_outcome(line.call_sid, outcome, "agent"))
     except Exception as exc:  # signed URL or connect failed: the caller is still on the keypad call
         log.warning("call %s: voice agent unavailable (%s)", line.call_sid, type(exc).__name__)
@@ -136,7 +137,7 @@ async def _campaign_call(line: Line, c: dict, r: dict, clips: dict[str, bytes]) 
             await line.play(clips["goodbye"])
             await line.finish()
             return
-        if digit == "4" and c["escalation"] and elevenlabs.agent_ready():
+        if digit == "4" and c["escalation"] and agents.ready(c.get("agent_provider") or "elevenlabs"):
             if await _escalate(line, c, r):
                 return
         await line.play(clips["menu"])

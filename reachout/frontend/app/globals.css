@@ -386,3 +386,15 @@ textarea.input.mono { font-family: "Geist Mono", ui-monospace, monospace; font-s
 .chat-input .input { flex: 1; }
 .chat-conn { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel-2); font-size: 13px; color: var(--muted); }
 .chat-conn b { color: var(--text); font-weight: 500; }
+
+/* providers page */
+.prov-help { margin: 0; padding: 0 16px 12px; color: var(--muted); font-size: 13px; }
+.prov-row { display: flex; justify-content: space-between; gap: 16px; padding: 14px 16px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.prov-main { min-width: 0; flex: 1 1 280px; }
+.prov-name { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 500; }
+.prov-sub { color: var(--muted); font-size: 13px; margin-top: 3px; }
+.prov-side { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.prov-region { color: var(--faint); font-size: 12px; }
+.prov-check { margin-top: 8px; font-size: 13px; }
+.prov-check.ok { color: var(--accent); }
+.prov-check.bad { color: var(--c-declined); }

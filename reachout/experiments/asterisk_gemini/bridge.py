@@ -23,7 +23,7 @@ import sys
 from google import genai
 from google.genai import types
 
-MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview")
+MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-3.8-live")
 PORT = int(os.getenv("PORT", "9092"))
 PROMPT = ("You are Reachout's test voice assistant on a phone call. Greet the caller briefly, "
           "then answer in one or two short sentences. Match the caller's language.")

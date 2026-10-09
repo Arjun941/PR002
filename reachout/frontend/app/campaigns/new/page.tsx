@@ -37,6 +37,7 @@ export default function NewCampaignPage() {
   const [textP, setTextP] = useState<TextProvider>("template");
   const [voiceP, setVoiceP] = useState<VoiceProvider>("piper");
   const [escalation, setEscalation] = useState(false);
+  const [agentP, setAgentP] = useState("");
   const [record, setRecord] = useState(false);
   const [csv, setCsv] = useState("");
   const [check, setCheck] = useState<{ key: string; res: ContactsCheck } | null>(null);
@@ -53,6 +54,7 @@ export default function NewCampaignPage() {
     if (best) setTextP(best.key as TextProvider);
     const voice = opts?.voice_providers.find(p => p.available);
     if (voice) setVoiceP(voice.key as VoiceProvider);
+    if (opts) setAgentP(a => a || opts.default_agent);
   }, [opts]);
 
   // Event described to the dashboard assistant: fill the form once, the person still reviews everything.
@@ -88,7 +90,7 @@ export default function NewCampaignPage() {
     [l, Object.fromEntries(SCRIPT_FIELDS.map(f => [f, d.scripts[l][f]]))])) : {};
   const estBody = d && contacts ? {
     kind: ev.kind, by_language: contacts.by_language, scripts: scriptsBody, retry: d.retry,
-    escalation, record, voice_provider: voiceP, text_provider: textP,
+    escalation, record, voice_provider: voiceP, text_provider: textP, agent_provider: agentP,
   } : null;
   const estKey = JSON.stringify(estBody);
 
@@ -107,6 +109,7 @@ export default function NewCampaignPage() {
 
   const langName = (c: string) => opts.languages.find(l => l.code === c)?.name ?? c;
   const provider = opts.text_providers.find(p => p.key === textP)!;
+  const chosenAgent = opts.agent_providers.find(p => p.key === agentP);
   const estimate = est?.key === estKey ? est.e : null;
 
   const ok = [
@@ -149,7 +152,7 @@ export default function NewCampaignPage() {
     setBusy("draft");
     try {
       const r = await post<{ draft: Draft; warnings: string[] }>("/builder/draft",
-        { event: ev, languages: langs, text_provider: textP, escalation });
+        { event: ev, languages: langs, text_provider: textP, escalation, agent_provider: agentP });
       setDraft({ key: draftKey, d: r.draft, warnings: r.warnings });
       setName(r.draft.name);
       setTab(langs[0]);
@@ -196,7 +199,7 @@ export default function NewCampaignPage() {
       onConfirm: async () => {
         const r = await post<{ id: string; mode: string }>("/campaigns", {
           name: name.trim(), event: ev, languages: langs, text_provider: textP, voice_provider: voiceP,
-          escalation, record, contacts_csv: csv, scripts: scriptsBody, retry: d.retry, reviewed,
+          escalation, agent_provider: agentP, record, contacts_csv: csv, scripts: scriptsBody, retry: d.retry, reviewed,
         });
         toast(r.mode === "live" ? "Campaign launched" : "Simulated campaign started");
         router.push(`/campaigns/${r.id}`);
@@ -302,10 +305,22 @@ export default function NewCampaignPage() {
           <label className="check">
             <input type="checkbox" checked={escalation && opts.escalation.available} disabled={!opts.escalation.available}
               onChange={e => setEscalation(e.target.checked)} />
-            <span>Offer the {opts.escalation.label} on key 4
-              <small>{!opts.escalation.available ? "Set ELEVENLABS_API_KEY and ELEVENLABS_AGENT_ID to turn this on."
-                : `Only callers who press 4 reach it, and those calls cost more. ${opts.escalation.sends}.`}</small></span>
+            <span>Offer a live voice assistant on key 4
+              <small>{!opts.escalation.available ? "Set GEMINI_API_KEY (Gemini Live), or the ElevenLabs agent keys, to turn this on."
+                : `Only callers who press 4 reach it, and those calls cost more. ${chosenAgent?.sends ?? opts.escalation.sends}.`}</small></span>
           </label>
+          {escalation && opts.escalation.available && (
+            <div className="field"><span className="label">Which assistant answers</span>
+              <div className="choices">
+                {opts.agent_providers.map(p => (
+                  <button key={p.key} className={`choice${agentP === p.key ? " on" : ""}`} disabled={!p.available}
+                    aria-pressed={agentP === p.key} onClick={() => setAgentP(p.key)}>
+                    <b>{p.label}{!p.available && <em>Not configured</em>}</b><small>{p.sends}</small>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <label className="check">
             <input type="checkbox" checked={record} onChange={e => setRecord(e.target.checked)} />
             <span>Record calls<small>Recordings are personal data. Playback needs a PIN and every play is logged.</small></span>

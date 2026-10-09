@@ -28,9 +28,10 @@ export function useCrumbs(crumbs: Crumb[]) {
 const NAV: { href: string; label: string; icon: IconName }[] = [
   { href: "/overview", label: "Overview", icon: "grid" },
   { href: "/campaigns", label: "Campaigns", icon: "phone" },
+  { href: "/providers", label: "Providers", icon: "cpu" },
 ];
 const SOON: { label: string; icon: IconName }[] = [
-  { label: "Contacts", icon: "users" }, { label: "Providers", icon: "cpu" }, { label: "Privacy", icon: "shield" },
+  { label: "Contacts", icon: "users" }, { label: "Privacy", icon: "shield" },
 ];
 
 function ModalView({ spec, onClose }: { spec: ModalSpec; onClose: () => void }) {
