@@ -20,6 +20,7 @@ export interface Recipient {
   outcome: Outcome; channel: "keypad" | "speech" | "agent" | null; attempts: number; retrying: boolean;
   has_recording: boolean; answers: Record<string, string>;
   last_call?: LastCall | null;
+  missing?: string[]; // decided, but these questions are still unanswered
 }
 export interface UnseenCall { call_id: string; campaign_id: string; recipient: string; at: string }
 export interface QA { question: string; answer: string }
@@ -53,7 +54,7 @@ export const questionText = (q: Question) =>
 export interface Detail extends Summary {
   by_language: Group[]; by_segment: Group[];
   handling: { audio: Handling; text: Handling; recordings: Handling };
-  retry_estimate_inr: number; retry_policy: RetryPolicy; note: string | null;
+  unfinished: number; retry_estimate_inr: number; retry_policy: RetryPolicy; note: string | null;
   provider: ProviderKey; mode: Mode; voice: string; system_prompt: string;
   ivr: Record<string, Record<string, boolean>>; synthesising: boolean;
   scripts: (Script & { language: string; code: string })[];

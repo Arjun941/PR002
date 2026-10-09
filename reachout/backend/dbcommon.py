@@ -44,6 +44,17 @@ def answers(r: dict) -> dict[str, str]:
         return {}
 
 
+def missing_questions(questions: list[dict] | None, r: dict) -> list[dict]:
+    """The follow-up questions this recipient still has to answer: they gave their decision (confirmed, declined or
+    rescheduled) but the call ended before every question that applies to them was answered. Questions meant only for people
+    who confirmed apply to nobody else."""
+    outcome = r.get("outcome")
+    if outcome not in ANSWERED:
+        return []
+    got = answers(r)
+    return [q for q in questions or [] if (outcome == "confirmed" or not q.get("only_if_confirmed", True)) and q["id"] not in got]
+
+
 def public_recipient(r: dict, questions: list[dict] = ()) -> dict:
     """questions (the campaign's) turn the keys pressed into option labels."""
     got = answers(r)

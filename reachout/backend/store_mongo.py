@@ -20,7 +20,7 @@ import time
 
 from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
 
-from .dbcommon import ANSWERED, BOOL_FIELDS, ago, now_iso
+from .dbcommon import ANSWERED, BOOL_FIELDS, ago, missing_questions, now_iso
 
 _CAMPAIGN_DEFAULTS = {"voice": "", "audio_ready": False, "note": None, "questions": [], "sim": {},
                       "event": {}, "scripts": {}, "retry": {}, "segments": [], "languages": [],
@@ -156,16 +156,23 @@ class MongoStore:
             return
         max_attempts = c["retry"].get("max_attempts", 1) if auto_retry else 0
         left = self.recipients_c.find_one({"campaign_id": c["id"], "$or": [
-            {"in_flight": 1}, {"outcome": "pending"},
+            {"in_flight": 1}, {"outcome": "pending"}, {"retrying": 1},
             {"outcome": {"$in": list(_DUE_RETRY)}, "attempts": {"$lt": max_attempts}}]}, {"_id": 1})
         if not left:
             self.campaigns_c.update_one({"_id": c["id"]}, {"$set": {"status": "completed"}})
 
     def requeue(self, cid: str) -> int:
-        """Non-responders back to pending for another try; reopens a finished campaign."""
+        """Non-responders back to pending for another try, and people who answered but did not finish the questions queued to
+        be called back (their decision stays). Reopens a finished campaign. Returns how many were queued."""
+        c = self.campaign(cid)
+        qs = (c or {}).get("questions") or []
         n = self.recipients_c.update_many(
             {"campaign_id": cid, "in_flight": 0, "outcome": {"$in": list(_DUE_RETRY)}},
             {"$set": {"outcome": "pending", "channel": None, "retrying": 1}}).modified_count
+        unfinished = [r["id"] for r in self.recipients(cid)
+                      if not r["in_flight"] and not r["retrying"] and missing_questions(qs, r)]
+        if unfinished:
+            n += self.recipients_c.update_many({"_id": {"$in": unfinished}}, {"$set": {"retrying": 1}}).modified_count
         if n:
             self.campaigns_c.update_one({"_id": cid, "status": "completed"}, {"$set": {"status": "running"}})
         return n
@@ -203,16 +210,21 @@ class MongoStore:
         free = concurrency - self.recipients_c.count_documents({"in_flight": 1})
         for c in running:
             due = {"campaign_id": c["id"], "in_flight": 0, "$or": [
-                {"outcome": "pending"},
+                {"outcome": "pending"}, {"retrying": 1},
                 {"outcome": {"$in": list(_DUE_RETRY)}, "attempts": {"$lt": c["retry"].get("max_attempts", 1)},
                  "last_attempt_at": {"$lte": ago(hours=c["retry"].get("gap_hours", 4))}}]}
             while free > 0:
-                d = self.recipients_c.find_one_and_update(
-                    due, {"$set": {"in_flight": 1, "retrying": 0, "outcome": "pending", "channel": None, "call_sid": None,
-                                   "recording_url": None, "last_attempt_at": now_iso()}, "$inc": {"attempts": 1}},
-                    sort=[("attempts", ASCENDING), ("seq", ASCENDING)], return_document=ReturnDocument.BEFORE)
-                if d is None:
+                nxt = self.recipients_c.find_one(due, sort=[("attempts", ASCENDING), ("seq", ASCENDING)])
+                if nxt is None:
                     break
+                # A recipient who already gave a decision and is called back to finish the questions keeps it.
+                claim = {"in_flight": 1, "retrying": 0, "call_sid": None, "recording_url": None, "last_attempt_at": now_iso()}
+                if nxt["outcome"] not in ANSWERED:
+                    claim |= {"outcome": "pending", "channel": None}
+                d = self.recipients_c.find_one_and_update({"_id": nxt["_id"], "in_flight": 0}, {"$set": claim, "$inc": {"attempts": 1}},
+                                                          return_document=ReturnDocument.BEFORE)
+                if d is None:  # taken by another tick between the two steps
+                    continue
                 batch.append((c, _recipient(d)))
                 free -= 1
         return batch

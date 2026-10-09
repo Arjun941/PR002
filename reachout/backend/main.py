@@ -25,6 +25,7 @@ from .costs import RETRY_ESTIMATE_PER_CALL, recipient_cost
 from .providers import router as providers_router
 from .history import latest_by_recipient, router as history_router
 from .recordings import router as recordings_router
+from .dbcommon import missing_questions
 from .recwire import CallRecordingMiddleware
 from .store import ANSWERED, LANGUAGES, NON_RESPONDER, OUTCOMES
 from .webphone import router as webphone_router
@@ -155,18 +156,22 @@ def campaign_detail(cid: str):
     c = _get(cid)
     recs = store.recipients(cid)
     calls = latest_by_recipient(cid)  # each recipient's latest call: what was asked and answered
-    return _summary(c, recs) | {
+    missing = {r["id"]: [q["label"] for q in missing_questions(c["questions"], r)] for r in recs}  # decided, but questions unanswered
+    unfinished = sum(1 for r in recs if missing[r["id"]] and not r["in_flight"])
+    s = _summary(c, recs)
+    return s | {
+        "totals": s["totals"] | {"retryable": s["totals"]["retryable"] + unfinished}, "unfinished": unfinished,
         "by_language": _group(recs, "language"),
         "by_segment": _group(recs, "segment"),
         "handling": c["handling"] | {"recordings": recstore.handling(c)},  # what is done with audio now, for older campaigns too
-        "retry_estimate_inr": round(sum(r["outcome"] in NON_RESPONDER for r in recs) * RETRY_ESTIMATE_PER_CALL, 1),
+        "retry_estimate_inr": round((sum(r["outcome"] in NON_RESPONDER for r in recs) + unfinished) * RETRY_ESTIMATE_PER_CALL, 1),
         "retry_policy": c["retry"],
         "note": c["note"],
         "provider": c["provider"] or c["agent_provider"], "mode": c["mode"], "voice": c["voice"],
         "system_prompt": c["system_prompt"], "ivr": audio.audio_status(c), "synthesising": cid in audio._active,
         "scripts": [{"language": LANGUAGES.get(l, l), "code": l} | s for l, s in c["scripts"].items()],
         "questions": _question_results(c["questions"], recs),
-        "recipients": [store.public_recipient(r, c["questions"]) | {"last_call": calls.get(r["id"])} for r in recs],
+        "recipients": [store.public_recipient(r, c["questions"]) | {"last_call": calls.get(r["id"]), "missing": missing[r["id"]]} for r in recs],
     }
 
 

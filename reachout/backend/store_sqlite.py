@@ -9,7 +9,7 @@ import sqlite3
 from contextlib import contextmanager
 from typing import Iterator
 
-from .dbcommon import ANSWERED, BOOL_FIELDS, ago, answers, now_iso
+from .dbcommon import ANSWERED, BOOL_FIELDS, ago, answers, missing_questions, now_iso
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS campaigns (
@@ -60,7 +60,8 @@ _ADDED = {"campaigns": [("voice", "TEXT NOT NULL DEFAULT ''"), ("audio_ready", "
                         ("chat_summary", "TEXT NOT NULL DEFAULT ''")],
           "recipients": [("answers", "TEXT NOT NULL DEFAULT '{}'")]}
 _DUE = ("campaign_id = ? AND in_flight = 0 AND (outcome = 'pending' "
-        "OR (outcome IN ('voicemail', 'no_answer') AND attempts < ? AND last_attempt_at <= ?))")
+        "OR (outcome IN ('voicemail', 'no_answer') AND attempts < ? AND last_attempt_at <= ?) "
+        "OR retrying = 1)")  # retrying: queued by hand, or an answered call that still has questions to finish
 
 
 def _campaign(row: sqlite3.Row) -> dict:
@@ -200,17 +201,26 @@ class SqliteStore:
         max_attempts = c["retry"].get("max_attempts", 1) if auto_retry else 0
         with self._tx() as db:
             left = db.execute(
-                "SELECT 1 FROM recipients WHERE campaign_id = ? AND (in_flight = 1 OR outcome = 'pending' "
+                "SELECT 1 FROM recipients WHERE campaign_id = ? AND (in_flight = 1 OR outcome = 'pending' OR retrying = 1 "
                 "OR (outcome IN ('voicemail', 'no_answer') AND attempts < ?)) LIMIT 1", (c["id"], max_attempts)).fetchone()
             if not left:
                 db.execute("UPDATE campaigns SET status = 'completed' WHERE id = ?", (c["id"],))
 
     def requeue(self, cid: str) -> int:
-        """Non-responders back to pending for another try; reopens a finished campaign."""
+        """Non-responders back to pending for another try, and people who answered but did not finish the questions queued to
+        be called back (their decision stays). Reopens a finished campaign. Returns how many were queued."""
+        c = self.campaign(cid)
+        qs = (c or {}).get("questions") or []
         with self._tx() as db:
             n = db.execute("UPDATE recipients SET outcome = 'pending', channel = NULL, retrying = 1 "
                            "WHERE campaign_id = ? AND in_flight = 0 AND outcome IN ('voicemail', 'no_answer')",
                            (cid,)).rowcount
+            unfinished = [r["id"] for r in db.execute(
+                "SELECT * FROM recipients WHERE campaign_id = ? AND in_flight = 0 AND retrying = 0 "
+                "AND outcome IN ('confirmed', 'declined', 'rescheduled')", (cid,)) if missing_questions(qs, dict(r))]
+            for rid in unfinished:
+                db.execute("UPDATE recipients SET retrying = 1 WHERE id = ?", (rid,))
+            n += len(unfinished)
             if n:
                 db.execute("UPDATE campaigns SET status = 'running' WHERE id = ? AND status = 'completed'", (cid,))
         return n
@@ -259,9 +269,11 @@ class SqliteStore:
                                   (c["id"], c["retry"].get("max_attempts", 1),
                                    ago(hours=c["retry"].get("gap_hours", 4)), free)).fetchall()
                 for r in rows:
-                    db.execute("UPDATE recipients SET in_flight = 1, attempts = attempts + 1, retrying = 0, outcome = 'pending', "
-                               "channel = NULL, call_sid = NULL, recording_url = NULL, last_attempt_at = ? WHERE id = ?",
-                               (now_iso(), r["id"]))
+                    # A recipient who already gave a decision and is called back to finish the questions keeps it.
+                    db.execute("UPDATE recipients SET in_flight = 1, attempts = attempts + 1, retrying = 0, "
+                               "outcome = CASE WHEN outcome IN ('confirmed', 'declined', 'rescheduled') THEN outcome ELSE 'pending' END, "
+                               "channel = CASE WHEN outcome IN ('confirmed', 'declined', 'rescheduled') THEN channel ELSE NULL END, "
+                               "call_sid = NULL, recording_url = NULL, last_attempt_at = ? WHERE id = ?", (now_iso(), r["id"]))
                     batch.append((c, dict(r)))
                     free -= 1
         return batch

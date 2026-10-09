@@ -139,14 +139,15 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
   const s = d.totals, n = s.retryable, busy = s.retrying > 0;
 
   const openRetry = () => modal({
-    title: "Retry non-responders",
+    title: "Retry unreached and unfinished calls",
     body: (
       <>
-        Recipients who reached voicemail or did not pick up will be called again with the same script, in their own language.
+        Recipients who reached voicemail or did not pick up are called again with the same script, in their own language.
+        {d.unfinished > 0 && " People who already gave their decision but did not answer every question (the call was cut off) are called back for the missing answers only; their decision stays."}
         {d.status === "paused" && " The campaign is paused, so calls start when you resume it."}
         <dl className="facts">
           <div><dt>Recipients</dt><dd>{fmt.int(n)}</dd></div>
-          <div><dt>Made up of</dt><dd>{fmt.int(s.counts.voicemail)} voicemail, {fmt.int(s.counts.no_answer)} no answer</dd></div>
+          <div><dt>Made up of</dt><dd>{fmt.int(s.counts.voicemail)} voicemail, {fmt.int(s.counts.no_answer)} no answer, {fmt.int(d.unfinished)} unfinished</dd></div>
           <div><dt>Estimated cost</dt><dd>{fmt.inr2(d.retry_estimate_inr)}</dd></div>
         </dl>
       </>
@@ -256,9 +257,9 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           {calling && <button className="btn" onClick={() => void setStatus("paused")}><Icon name="pause" />Pause</button>}
           {d.status === "paused" && <button className="btn" onClick={() => void setStatus("running")}><Icon name="play" />Resume</button>}
           <button className="btn primary" disabled={n === 0 || busy} onClick={openRetry}
-            title={n === 0 && !busy ? "No one is waiting for a retry" : ""}>
+            title={n === 0 && !busy ? "Everyone has been reached and has answered every question" : ""}>
             {busy ? <span className="spinner" /> : <Icon name="refresh" />}
-            {busy ? `Retrying ${fmt.int(s.retrying)}` : "Retry non-responders"}
+            {busy ? `Retrying ${fmt.int(s.retrying)}` : "Retry unreached or unfinished"}
             {!busy && n > 0 && <span className="count">{fmt.int(n)}</span>}
           </button>
           <button className="btn" disabled={calling} onClick={() => router.push(`/campaigns/${id}/edit`)}
@@ -328,13 +329,14 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                     <Fragment key={r.id}>
                     <tr>
                       <td>{r.name}</td><td className="mono muted">{r.phone}</td><td>{r.language}</td>
-                      <td className="muted">{r.segment}</td><td><OutcomePill r={r} /></td>
+                      <td className="muted">{r.segment}</td><td><OutcomePill r={r} />{!!r.missing?.length && !r.retrying && (
+                        <span className="chip" style={{ marginLeft: 6 }} title={`Still to answer: ${r.missing.join(", ")}`}>{r.missing.length} unanswered</span>)}</td>
                       <td className="muted">{r.channel ? CHANNEL[r.channel] : "–"}</td><td className="num">{r.attempts}</td>
                       <td className="num">{r.has_recording && (
                         <button className="btn sm ghost" onClick={() => void play(r)} aria-label={`Play recording for ${r.name}`}>
                           <Icon name="play" size={12} />Play
                         </button>
-                      )}{(r.last_call || d.questions.some(q => r.answers[q.id])) && (
+                      )}{(r.last_call || r.missing?.length || d.questions.some(q => r.answers[q.id])) && (
                         <button className="btn sm ghost" aria-expanded={expanded === r.id} onClick={() => setExpanded(x => x === r.id ? null : r.id)}>
                           {expanded === r.id ? "Hide" : `Details${r.last_call?.qa.length ? ` (${r.last_call.qa.length})` : ""}`}
                         </button>
@@ -343,6 +345,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                     {expanded === r.id && (
                       <tr className="recipient-detail">
                         <td colSpan={8}>
+                          {!!r.missing?.length && <p className="muted">Still to answer: {r.missing.join(", ")}. Use “Retry unreached or unfinished” to call them back for these.</p>}
                           {d.questions.some(q => r.answers[q.id]) && (
                             <dl className="facts">{d.questions.filter(q => r.answers[q.id]).map(q => <div key={q.id}><dt>{q.label}</dt><dd>{r.answers[q.id]}</dd></div>)}</dl>
                           )}
