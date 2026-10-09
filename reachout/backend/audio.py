@@ -45,7 +45,9 @@ def phrases(script: dict) -> dict[str, str]:
     """The pieces a call is assembled from; the greeting is split around {name}."""
     pre, _, post = script["greeting"].partition("{name}")
     return {"greeting_pre": pre.strip(), "greeting_post": post.strip(), "message": script["message"],
-            "menu": script["menu"], "voicemail": script["voicemail"], "goodbye": script["goodbye"]}
+            "menu": script["menu"], "voicemail": script["voicemail"], "goodbye": script["goodbye"],
+            "doubts": script.get("doubts") or ""} | {
+        f"q:{qid}": text for qid, text in (script.get("questions") or {}).items()}
 
 
 def call_audio(c: dict, r: dict) -> dict[str, bytes] | None:
@@ -56,7 +58,8 @@ def call_audio(c: dict, r: dict) -> dict[str, bytes] | None:
     p = {k: load(voice, lang, t) for k, t in phrases(c["scripts"][lang]).items()}
     greeting = b"".join(x for x in (p["greeting_pre"], load(voice, lang, r["name"]), p["greeting_post"]) if x)
     return {"intro": greeting + PAUSE + p["message"] + PAUSE, "menu": p["menu"],
-            "voicemail": p["voicemail"], "goodbye": p["goodbye"]}
+            "voicemail": p["voicemail"], "goodbye": p["goodbye"], "doubts": p["doubts"],
+            "questions": {k[2:]: v for k, v in p.items() if k.startswith("q:")}}
 
 
 async def prepare(cid: str) -> None:
@@ -65,11 +68,9 @@ async def prepare(cid: str) -> None:
         return
     voice = c["voice"]
     if not ready(voice):
-        with store.tx() as db:
-            db.execute("UPDATE campaigns SET status = 'paused', note = ? WHERE id = ? AND status = 'preparing'",
-                       ("ElevenLabs is not configured: set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID, then resume."
-                        if voice in SYNTH else "This campaign's voice provider cannot produce call audio. "
-                        "Create the campaign again with ElevenLabs.", cid))
+        store.pause_preparing(cid, "ElevenLabs is not configured: set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID, then resume."
+                              if voice in SYNTH else "This campaign's voice provider cannot produce call audio. "
+                              "Create the campaign again with ElevenLabs.")
         return
     todo = {(l, t) for l, s in c["scripts"].items() for t in phrases(s).values() if t.strip()}
     todo |= {(r["language"], r["name"]) for r in store.recipients(cid)}
@@ -99,19 +100,14 @@ async def prepare(cid: str) -> None:
         exc = group.exceptions[0] if isinstance(group, ExceptionGroup) else group
         why = f"HTTP {exc.response.status_code}" if isinstance(exc, httpx.HTTPStatusError) else type(exc).__name__
         log.error("campaign %s: voice synthesis failed (%s)", cid, why)
-        with store.tx() as db:
-            db.execute("UPDATE campaigns SET status = 'paused', note = ? WHERE id = ? AND status = 'preparing'",
-                       (f"Voice synthesis failed ({why}). Check the ElevenLabs key, voice and quota, then resume.", cid))
+        store.pause_preparing(cid, f"Voice synthesis failed ({why}). Check the ElevenLabs key, voice and quota, then resume.")
         return
-    with store.tx() as db:
-        db.execute("UPDATE campaigns SET audio_ready = 1, note = NULL WHERE id = ?", (cid,))
-        db.execute("UPDATE campaigns SET status = 'running' WHERE id = ? AND status = 'preparing'", (cid,))
+    store.finish_audio(cid)
     log.info("campaign %s: voice ready", cid)
 
 
 def _note(cid: str, note: str) -> None:
-    with store.tx() as db:
-        db.execute("UPDATE campaigns SET note = ? WHERE id = ?", (note, cid))
+    store.set_note(cid, note)
 
 
 async def run() -> None:

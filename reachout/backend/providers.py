@@ -25,7 +25,7 @@ def providers():
     default_agent = agents.default()
     return {"groups": [
         {"key": "live", "title": "Live voice assistant",
-         "help": "Talks to callers who press 4. The only part of a call that runs a live voice model, so it is the part that costs.",
+         "help": "Answers callers who ask a question at the end of the call. The only part of a call that runs a live voice model, so it is the part that costs.",
          "items": [_item(k, v, agents.ready(k), v["setup"], default=k == default_agent and agents.ready(k),
                          model=gemini_live.model() if k == "gemini" else None, checkable=k == "gemini")
                    for k, v in agents.PROVIDERS.items()]},

@@ -4,13 +4,12 @@ for campaigns marked `simulated`. Real campaigns are never touched by this modul
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
-import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from . import store
-from .dialer import refresh_status
 from .store import ANSWERED, NON_RESPONDER, now_iso
 
 log = logging.getLogger("reachout.demo")
@@ -26,6 +25,10 @@ SPECS = [
          langs={"en": .35, "hi": .40, "mr": .25}, segments={"Students": .5, "Faculty": .2, "Alumni": .3},
          size=420, done=.78, pickup=.58, mix={"confirmed": .52, "declined": .30, "rescheduled": .18}, days_ago=2,
          escalation=True,
+         questions=[{"id": "q1", "label": "Lunch preference", "options": ["Vegetarian", "Non-vegetarian", "No lunch"],
+                     "only_if_confirmed": True},
+                    {"id": "q2", "label": "Joining the hands-on workshop", "options": ["Yes", "No"],
+                     "only_if_confirmed": True}],
          handling=dict(audio=dict(provider="Sarvam", note="Processed in India"),
                        text=dict(provider="Ollama (local)", note="Stays on this machine"),
                        recordings=dict(provider="Exotel", note="Stored in India"))),
@@ -65,9 +68,14 @@ def _roll(rng: random.Random, c: dict, pickup: float | None) -> tuple[str, str |
     return rng.choices(NON_RESPONDER, [.55, .45])[0], None
 
 
-def _apply(r: dict, outcome: str, channel: str | None, record: bool, at: str) -> None:
+def _apply(r: dict, outcome: str, channel: str | None, record: bool, at: str,
+           questions: list[dict] = (), rng: random.Random | None = None) -> None:
     r.update(outcome=outcome, channel=channel, attempts=r["attempts"] + 1, retrying=0, last_attempt_at=at,
              recording_url="demo" if record and outcome in ANSWERED else None)
+    if rng and outcome in ANSWERED:  # simulated follow-up answers, skewed towards the first options
+        r["answers"] = json.dumps({q["id"]: str(rng.choices(range(1, len(q["options"]) + 1),
+                                                            [len(q["options"]) - i for i in range(len(q["options"]))])[0])
+                                   for q in questions if outcome == "confirmed" or not q.get("only_if_confirmed", True)})
 
 
 def seed() -> None:
@@ -82,6 +90,7 @@ def seed() -> None:
             "started_at": (now - timedelta(days=spec["days_ago"], hours=3)).isoformat(timespec="seconds"),
             "handling": spec["handling"], "retry": {"max_attempts": 1, "gap_hours": 4},
             "record": 1, "escalation": int(spec["escalation"]), "simulated": 1, "sim": {"mix": spec["mix"]},
+            "questions": spec.get("questions", []),
         }
         cc = c | {"escalation": spec["escalation"]}
         recs, calls = [], []
@@ -92,7 +101,7 @@ def seed() -> None:
                 "name": f"{rng.choice(FIRST)} {rng.choice(LAST)}.",
                 "phone": f"+91{rng.choice('6789')}{rng.randint(0, 10**9 - 1):09d}",  # fake numbers
                 "language": lang, "segment": seg, "outcome": "pending", "channel": None, "attempts": 0,
-                "retrying": 0, "in_flight": 0, "call_sid": None, "last_attempt_at": None, "recording_url": None,
+                "retrying": 0, "in_flight": 0, "call_sid": None, "last_attempt_at": None, "recording_url": None, "answers": "{}",
                 "pickup": max(.2, min(.9, spec["pickup"] + seg_adj[seg] + lang_adj[lang])),
             }
             tries = 0
@@ -102,7 +111,8 @@ def seed() -> None:
                 if r["outcome"] not in ("pending", *NON_RESPONDER):
                     break
                 at = (now - timedelta(days=rng.randint(0, spec["days_ago"]), minutes=rng.randint(0, 90)))
-                _apply(r, *_roll(rng, cc, r["pickup"]), record=rng.random() < .4, at=at.isoformat(timespec="seconds"))
+                _apply(r, *_roll(rng, cc, r["pickup"]), record=rng.random() < .4, at=at.isoformat(timespec="seconds"),
+                       questions=c["questions"], rng=rng)
                 calls.append({"campaign_id": spec["id"], "recipient_id": r["id"], "call_sid": None,
                               "at": r["last_attempt_at"], "answered": int(r["outcome"] in ANSWERED), "outcome": r["outcome"]})
             recs.append(r)
@@ -110,30 +120,24 @@ def seed() -> None:
     log.info("seeded %d demo campaigns", len(SPECS))
 
 
-def _resolve(db: sqlite3.Connection, rng: random.Random, c: dict, row: sqlite3.Row) -> None:
-    r = dict(row)
-    _apply(r, *_roll(rng, c, r["pickup"]), record=c["record"], at=now_iso())
-    db.execute("UPDATE recipients SET outcome = ?, channel = ?, attempts = ?, retrying = 0, last_attempt_at = ?, "
-               "recording_url = ? WHERE id = ?",
-               (r["outcome"], r["channel"], r["attempts"], r["last_attempt_at"], r["recording_url"], r["id"]))
-    store.log_call(db, r, r["outcome"])
+def _resolve(rng: random.Random, c: dict, r: dict) -> None:
+    _apply(r, *_roll(rng, c, r["pickup"]), record=c["record"], at=now_iso(), questions=c["questions"], rng=rng)
+    store.save_result(r, r["outcome"])
 
 
 def _tick(rng: random.Random) -> None:
     for c in store.campaigns():
         if not c["simulated"]:
             continue
-        with store.tx() as db:
-            pending = db.execute("SELECT * FROM recipients WHERE campaign_id = ? AND outcome = 'pending'",
-                                 (c["id"],)).fetchall()
-            retrying = [r for r in pending if r["retrying"]]
-            picks = rng.sample(retrying, min(len(retrying), 8))
-            if c["status"] == "running":
-                fresh = [r for r in pending if not r["retrying"]]
-                picks += rng.sample(fresh, min(len(fresh), rng.randint(1, 3)))
-            for r in picks:
-                _resolve(db, rng, c, r)
-            refresh_status(db, c, auto_retry=False)
+        pending = store.pending_recipients(c["id"])
+        retrying = [r for r in pending if r["retrying"]]
+        picks = rng.sample(retrying, min(len(retrying), 8))
+        if c["status"] == "running":
+            fresh = [r for r in pending if not r["retrying"]]
+            picks += rng.sample(fresh, min(len(fresh), rng.randint(1, 3)))
+        for r in picks:
+            _resolve(rng, c, r)
+        store.refresh_status(c, auto_retry=False)
 
 
 async def simulate() -> None:

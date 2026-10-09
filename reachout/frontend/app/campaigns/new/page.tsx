@@ -1,29 +1,32 @@
 "use client";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, post } from "@/lib/api";
 import { fmt, KIND } from "@/lib/format";
 import {
-  PREFILL_KEY, SCRIPT_FIELDS, type BuilderOptions, type ContactsCheck, type Draft, type Estimate, type EventDetails,
+  PREFILL_KEY, SCRIPT_FIELDS, questionText, type Prefill, type Question, type BuilderOptions, type ContactsCheck, type Draft, type Estimate, type EventDetails,
   type Script, type TextProvider, type VoiceProvider,
 } from "@/lib/types";
 import { useData } from "@/components/hooks";
 import { Icon } from "@/components/Icon";
 import { useCrumbs, useShell } from "@/components/Shell";
+import { QuestionsEditor } from "@/components/QuestionsEditor";
 import { ErrorView, HandlingCard, Notice, PageHead, Skeleton } from "@/components/ui";
 
 const STEPS = ["Event", "Contacts", "Scripts", "Review and launch"];
-const FIELD: Record<keyof Script, [label: string, hint: string, rows: number]> = {
+const FIELD: Record<(typeof SCRIPT_FIELDS)[number], [label: string, hint: string, rows: number]> = {
   greeting: ["Greeting", "{name} is replaced with each person's name.", 2],
   message: ["Message", "What the call is about.", 3],
-  menu: ["Keypad menu", "Keys are fixed: 1 confirm, 2 decline, 3 reschedule, 4 assistant.", 2],
+  menu: ["Keypad menu (main answer)", "Keys are fixed: 1 confirm, 2 decline, 3 reschedule.", 2],
   voicemail: ["Voicemail", "Played when nobody responds after the greeting.", 2],
   goodbye: ["Goodbye", "", 1],
 };
 const TITLE_HINT: Record<string, string> = {
   seminar: "Pune AI Summit", clinic: "your follow-up with Dr Rao", school: "the parent-teacher meeting", payment: "the Term 2 fee of ₹4,500",
 };
-const SAMPLE = "name,phone,language,segment\nAsha Kulkarni,8943198705,hi,Class 5\nRavi Menon,+91 8301920200,en,Class 6\n";
+const SAMPLE = "name,phone,language,segment\nAsha Kulkarni,8943198705,ml,Class 5\nRavi Menon,+91 8301920200,en,Class 6\n";
+
+const EMPTY_EVENT: EventDetails = { org: "", kind: "seminar", title: "", date: "", time: "", venue: "", details: "" };
 
 export default function NewCampaignPage() {
   useCrumbs([["Campaigns", "/campaigns"], ["New campaign"]]);
@@ -32,7 +35,7 @@ export default function NewCampaignPage() {
   const { data: opts, error, retry } = useData(() => api<BuilderOptions>("/builder/options"), []);
 
   const [step, setStep] = useState(0);
-  const [ev, setEv] = useState<EventDetails>({ org: "", kind: "seminar", title: "", date: "", time: "", venue: "", details: "" });
+  const [ev, setEv] = useState<EventDetails>(EMPTY_EVENT);
   const [langs, setLangs] = useState<string[]>(["en"]);
   const [textP, setTextP] = useState<TextProvider>("template");
   const [voiceP, setVoiceP] = useState<VoiceProvider>("piper");
@@ -49,9 +52,11 @@ export default function NewCampaignPage() {
   const [busy, setBusy] = useState<"" | "draft" | "contacts" | "chatgpt">("");
 
   // Prefer a configured model (templates are the fallback) and a voice that can make real calls.
+  // An assistant hand-off keeps the model that wrote its scripts, so the draft is not marked stale.
+  const prefilledModel = useRef(false);
   useEffect(() => {
     const best = opts?.text_providers.find(p => p.key !== "template" && p.available);
-    if (best) setTextP(best.key as TextProvider);
+    if (best && !prefilledModel.current) setTextP(best.key as TextProvider);
     const voice = opts?.voice_providers.find(p => p.available);
     if (voice) setVoiceP(voice.key as VoiceProvider);
     if (opts) setAgentP(a => a || opts.default_agent);
@@ -63,10 +68,20 @@ export default function NewCampaignPage() {
       const raw = sessionStorage.getItem(PREFILL_KEY);
       if (!raw) return;
       sessionStorage.removeItem(PREFILL_KEY);
-      const p = JSON.parse(raw) as { event: EventDetails; languages: string[] };
-      setEv(prev => ({ ...prev, ...p.event }));
-      if (p.languages?.length) setLangs(p.languages);
-      toast("Event filled in from your description. Check it, then add contacts.");
+      const p = JSON.parse(raw) as Prefill;
+      const event = { ...EMPTY_EVENT, ...p.event };
+      const languages = p.languages?.length ? p.languages : ["en"];
+      setEv(event);
+      setLangs(languages);
+      if (p.text_provider) { prefilledModel.current = true; setTextP(p.text_provider); }
+      if (p.draft && p.text_provider) {
+        // Keyed exactly like a draft made here (escalation starts off), so editing the event still flags it stale.
+        setDraft({ key: JSON.stringify([event, languages, p.text_provider, false]), d: p.draft, warnings: p.warnings ?? [] });
+        setName(p.draft.name);
+        setTab(languages[0]);
+      }
+      toast(p.draft ? "Event and scripts filled in by the assistant. Add contacts, then review the scripts."
+        : "Event filled in from your description. Check it, then add contacts.");
     } catch { /* unreadable or unavailable storage: start with an empty form */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -86,10 +101,14 @@ export default function NewCampaignPage() {
   const contactsKey = JSON.stringify([csv, langs]);
   const d = draft?.d;
   const contacts = check?.key === contactsKey ? check.res : null;
+  const questions = d?.questions ?? [];
+  const asks = escalation && !!opts?.escalation.available;  // the call ends with "any other questions?"
   const scriptsBody = d ? Object.fromEntries(langs.filter(l => d.scripts[l]).map(l =>
-    [l, Object.fromEntries(SCRIPT_FIELDS.map(f => [f, d.scripts[l][f]]))])) : {};
+    [l, { ...Object.fromEntries(SCRIPT_FIELDS.map(f => [f, d.scripts[l][f]])),
+      questions: Object.fromEntries(questions.map(q => [q.id, d.scripts[l].questions?.[q.id] ?? ""])),
+      ...(asks ? { doubts: d.scripts[l].doubts ?? "" } : {}) }])) : {};
   const estBody = d && contacts ? {
-    kind: ev.kind, by_language: contacts.by_language, scripts: scriptsBody, retry: d.retry,
+    kind: ev.kind, by_language: contacts.by_language, scripts: scriptsBody, retry: d.retry, questions,
     escalation, record, voice_provider: voiceP, text_provider: textP, agent_provider: agentP,
   } : null;
   const estKey = JSON.stringify(estBody);
@@ -115,10 +134,15 @@ export default function NewCampaignPage() {
   const ok = [
     !!ev.title.trim() && langs.length > 0,
     !!contacts && contacts.count > 0 && contacts.error_count === 0,
-    !!d && !!name.trim() && langs.every(l => d.scripts[l] && SCRIPT_FIELDS.every(f => d.scripts[l][f].trim())),
+    !!d && !!name.trim() && langs.every(l => d.scripts[l] && SCRIPT_FIELDS.every(f => d.scripts[l][f].trim())) &&
+      questions.every(q => q.label.trim() && q.options.every(o => o.trim()) &&
+        langs.every(l => d.scripts[l]?.questions?.[q.id]?.trim())) &&
+      (!asks || langs.every(l => d.scripts[l]?.doubts?.trim())),
   ];
   const reachable = (i: number) => ok.slice(0, i).every(Boolean);
-  const placeholders = d ? langs.filter(l => d.scripts[l]?.placeholder) : [];
+  // English placeholder text left in another language: whole scripts, or questions still in their English fallback.
+  const placeholders = d ? langs.filter(l => d.scripts[l]?.placeholder ||
+    (l !== "en" && questions.some(q => d.scripts[l]?.questions?.[q.id] === questionText(q)))) : [];
 
   const setE = (patch: Partial<EventDetails>) => setEv(p => ({ ...p, ...patch }));
   const toggleLang = (c: string) => setLangs(p => p.includes(c) ? p.filter(x => x !== c) : [...p, c]);
@@ -161,8 +185,24 @@ export default function NewCampaignPage() {
     finally { setBusy(""); }
   };
 
-  const editScript = (l: string, f: keyof Script, v: string) => setDraft(p => p && {
+  const editScript = (l: string, f: (typeof SCRIPT_FIELDS)[number], v: string) => setDraft(p => p && {
     ...p, d: { ...p.d, scripts: { ...p.d.scripts, [l]: { ...p.d.scripts[l], [f]: v, placeholder: false } } },
+  });
+  const editQuestionText = (l: string, id: string, v: string) => setDraft(p => p && {
+    ...p, d: { ...p.d, scripts: { ...p.d.scripts, [l]: { ...p.d.scripts[l], questions: { ...p.d.scripts[l].questions, [id]: v } } } },
+  });
+  // Question edits keep each language's spoken text in step: an untouched English fallback follows the
+  // question; text the AI translated or someone wrote is left alone (the editor asks them to update it).
+  const setQuestions = (next: Question[]) => setDraft(p => {
+    if (!p) return p;
+    const old = new Map((p.d.questions ?? []).map(q => [q.id, q]));
+    const scripts = Object.fromEntries(Object.entries(p.d.scripts).map(([l, sc]) => [l, {
+      ...sc, questions: Object.fromEntries(next.map(q => {
+        const prev = sc.questions?.[q.id], o = old.get(q.id);
+        return [q.id, prev === undefined || (o && prev === questionText(o)) ? questionText(q) : prev];
+      })),
+    }]));
+    return { ...p, d: { ...p.d, questions: next, scripts } };
   });
   const editRetry = (k: "max_attempts" | "gap_hours", v: number) => setDraft(p => p && {
     ...p, d: { ...p.d, retry: { ...p.d.retry, [k]: v } },
@@ -191,6 +231,7 @@ export default function NewCampaignPage() {
             <div><dt>Recipients</dt><dd>{fmt.int(contacts.count)}</dd></div>
             <div><dt>Languages</dt><dd>{langs.map(langName).join(", ")}</dd></div>
             <div><dt>Retries</dt><dd>Up to {d.retry.max_attempts} attempts, {d.retry.gap_hours} h apart</dd></div>
+            <div><dt>Follow-up questions</dt><dd>{questions.length ? questions.map(q => q.label).join(", ") : "None"}</dd></div>
             <div><dt>Estimated cost</dt><dd>{fmt.inr2(estimate.total_inr)}</dd></div>
           </dl>
         </>
@@ -199,7 +240,7 @@ export default function NewCampaignPage() {
       onConfirm: async () => {
         const r = await post<{ id: string; mode: string }>("/campaigns", {
           name: name.trim(), event: ev, languages: langs, text_provider: textP, voice_provider: voiceP,
-          escalation, agent_provider: agentP, record, contacts_csv: csv, scripts: scriptsBody, retry: d.retry, reviewed,
+          escalation, agent_provider: agentP, record, contacts_csv: csv, scripts: scriptsBody, questions, retry: d.retry, reviewed,
         });
         toast(r.mode === "live" ? "Campaign launched" : "Simulated campaign started");
         router.push(`/campaigns/${r.id}`);
@@ -305,9 +346,9 @@ export default function NewCampaignPage() {
           <label className="check">
             <input type="checkbox" checked={escalation && opts.escalation.available} disabled={!opts.escalation.available}
               onChange={e => setEscalation(e.target.checked)} />
-            <span>Offer a live voice assistant on key 4
+            <span>End by asking for any other questions; a live voice assistant answers them
               <small>{!opts.escalation.available ? "Set GEMINI_API_KEY (Gemini Live), or the ElevenLabs agent keys, to turn this on."
-                : `Only callers who press 4 reach it, and those calls cost more. ${chosenAgent?.sends ?? opts.escalation.sends}.`}</small></span>
+                : `Only callers who start asking something reach it, and those calls cost more. ${chosenAgent?.sends ?? opts.escalation.sends}.`}</small></span>
           </label>
           {escalation && opts.escalation.available && (
             <div className="field"><span className="label">Which assistant answers</span>
@@ -333,7 +374,7 @@ export default function NewCampaignPage() {
           <section className="card form">
             <div className="field"><label htmlFor="csv">Contact list</label>
               <textarea id="csv" className="input mono" rows={9} value={csv} onChange={e => setCsv(e.target.value)} spellCheck={false}
-                placeholder={"name, phone, language, segment\nAsha Kulkarni, 98765 43210, hi, Class 5"} />
+                placeholder={"name, phone, language, segment\nAsha Kulkarni, 98765 43210, ml, Class 5"} />
               <span className="hint">
                 CSV with name and phone; language ({langs.join(", ")}) and segment are optional. A header row is optional.
                 Missing language means {langName(langs[0])}.
@@ -389,13 +430,15 @@ export default function NewCampaignPage() {
         <section className="card empty">
           <h2>Draft every script in one go</h2>
           <p>{provider.label} writes the greeting, message, keypad menu, voicemail and goodbye in{" "}
-            {langs.map(langName).join(", ")}, plus a retry policy. One call for the whole campaign; you review everything before launch.</p>
+            {langs.map(langName).join(", ")}, picks the follow-up questions this event needs (food preference, T-shirt
+            size and so on, or none), and suggests a retry policy. One call for the whole campaign; you review everything before launch.</p>
           <p className="muted" style={{ marginTop: 6, fontSize: 13 }}>{provider.sends}.</p>
           <p style={{ marginTop: 16 }}>
             <button className="btn primary" disabled={busy === "draft"} onClick={() => void makeDraft()}>
               {busy === "draft" ? <><span className="spinner" />Drafting</> : <><Icon name="wand" />Draft scripts</>}
             </button>
           </p>
+          {busy === "draft" && <p className="muted" style={{ marginTop: 8, fontSize: 13 }}>Writing every language in one go can take up to a minute.</p>}
         </section>
       ) : (
         <>
@@ -429,6 +472,8 @@ export default function NewCampaignPage() {
               </div>
             </div>
           </section>
+          <QuestionsEditor questions={questions} onChange={setQuestions} escalation={escalation && opts.escalation.available}
+            payment={ev.kind === "payment"} />
           <section className="card">
             <div className="tabs" role="tablist">
               {langs.map(l => (
@@ -444,6 +489,21 @@ export default function NewCampaignPage() {
                     <textarea id={`s-${f}`} className="input" rows={FIELD[f][2]} value={d.scripts[tab][f]}
                       onChange={e => editScript(tab, f, e.target.value)} lang={tab} />
                     {FIELD[f][1] && <span className="hint">{FIELD[f][1]}</span>}
+                  </div>
+                ))}
+                {asks && (
+                  <div className="field"><label htmlFor="s-doubts">Closing question</label>
+                    <textarea id="s-doubts" className="input" rows={2} lang={tab} value={d.scripts[tab].doubts ?? ""}
+                      onChange={e => setDraft(p => p && { ...p, d: { ...p.d, scripts: { ...p.d.scripts, [tab]: { ...p.d.scripts[tab], doubts: e.target.value } } } })} />
+                    <span className="hint">Asked last. A caller who starts speaking is connected to the assistant.
+                      {!d.scripts[tab].doubts && " Redraft to have the AI write it in every language."}</span>
+                  </div>
+                )}
+                {questions.map((q, i) => (
+                  <div className="field" key={q.id}><label htmlFor={`s-${q.id}`}>Question {i + 1}: {q.label || "untitled"}</label>
+                    <textarea id={`s-${q.id}`} className="input" rows={2} lang={tab} value={d.scripts[tab].questions?.[q.id] ?? ""}
+                      onChange={e => editQuestionText(tab, q.id, e.target.value)} />
+                    <span className="hint">Read out every option with its key: {q.options.map((o, k) => `${k + 1} ${o || "…"}`).join(", ")}.</span>
                   </div>
                 ))}
               </div>

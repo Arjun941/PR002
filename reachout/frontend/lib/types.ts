@@ -18,16 +18,29 @@ export interface Handling { provider: string; note: string }
 export interface Recipient {
   id: string; name: string; phone: string; language: string; segment: string;
   outcome: Outcome; channel: "keypad" | "speech" | "agent" | null; attempts: number; retrying: boolean;
-  has_recording: boolean;
+  has_recording: boolean; answers: Record<string, string>;
 }
 export interface RetryPolicy { max_attempts: number; gap_hours: number }
 export const SCRIPT_FIELDS = ["greeting", "message", "menu", "voicemail", "goodbye"] as const;
-export type Script = Record<(typeof SCRIPT_FIELDS)[number], string>;
+export type Script = Record<(typeof SCRIPT_FIELDS)[number], string> & {
+  questions?: Record<string, string>;
+  doubts?: string;  // closing "any other questions?" when the assistant is on
+};
+/** A follow-up keypad question after the main 1/2/3 answer; option n is key n. */
+export interface Question { id: string; label: string; options: string[]; only_if_confirmed: boolean }
+export interface QuestionResult extends Question {
+  answered: number; results: { key: string; label: string; count: number }[];
+}
+export const MAX_QUESTIONS = 4, MIN_OPTIONS = 2, MAX_OPTIONS = 6;
+/** English fallback for a question's spoken text (same wording as the backend's). */
+export const questionText = (q: Question) =>
+  `${q.label}. Press ${q.options.map((o, i) => `${i + 1} for ${o}`).join(", ")}.`;
 export interface Detail extends Summary {
   by_language: Group[]; by_segment: Group[];
   handling: { audio: Handling; text: Handling; recordings: Handling };
   retry_estimate_inr: number; retry_policy: RetryPolicy; note: string | null;
   scripts: (Script & { language: string })[];
+  questions: QuestionResult[];
   recipients: Recipient[];
 }
 
@@ -55,11 +68,16 @@ export interface BuilderOptions {
 }
 export const PREFILL_KEY = "reachout.prefill";
 export interface AssistantReply {
-  reply: string; ready: boolean; event: EventDetails | null; languages: string[]; provider: string; warnings: string[];
+  reply: string; ready: boolean; event: EventDetails | null; languages: string[]; language_names: string[];
+  missing: { key: string; label: string }[]; suggested: ("title" | "details")[]; provider: string; provider_key: TextProvider; warnings: string[];
+}
+/** Handed from the assistant to the builder through sessionStorage. */
+export interface Prefill {
+  event: EventDetails; languages: string[]; text_provider?: TextProvider; draft?: Draft; warnings?: string[];
 }
 export interface EventDetails { org: string; kind: Kind; title: string; date: string; time: string; venue: string; details: string }
 export interface Draft {
-  name: string; scripts: Record<string, Script & { placeholder: boolean }>; retry: RetryPolicy;
+  name: string; scripts: Record<string, Script & { placeholder: boolean }>; questions: Question[]; retry: RetryPolicy;
   notes: string; provider: TextProvider;
 }
 export interface ContactsCheck {

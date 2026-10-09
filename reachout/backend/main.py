@@ -14,10 +14,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
-from . import assistant, audio, chatgpt, demo, dialer, exotel, store
+from . import assistant, audio, chatgpt, demo, dialer, exotel, store, stt
 from .builder import DEMO, router as builder_router
 from .costs import RETRY_ESTIMATE_PER_CALL, recipient_cost
 from .providers import router as providers_router
@@ -84,6 +84,20 @@ def _daily() -> list[dict]:
             for d, (n, a) in days.items()]
 
 
+def _question_results(questions: list[dict], recs: list[dict]) -> list[dict]:
+    """How many people pressed each option of each follow-up question."""
+    out = []
+    for q in questions:
+        counts = [0] * len(q["options"])
+        for r in recs:
+            k = store.answers(r).get(q["id"], "")
+            if k.isdigit() and 0 < int(k) <= len(counts):
+                counts[int(k) - 1] += 1
+        out.append(q | {"answered": sum(counts),
+                        "results": [{"key": str(i + 1), "label": o, "count": n} for i, (o, n) in enumerate(zip(q["options"], counts))]})
+    return out
+
+
 def _get(cid: str) -> dict:
     c = store.campaign(cid)
     if not c:
@@ -108,6 +122,7 @@ app.include_router(voicebot_router)
 app.include_router(builder_router)
 app.include_router(chatgpt.router)
 app.include_router(assistant.router)
+app.include_router(stt.router)
 app.include_router(dialer.router)
 app.include_router(recordings_router)
 app.include_router(providers_router)
@@ -142,20 +157,15 @@ def campaign_detail(cid: str):
         "retry_policy": c["retry"],
         "note": c["note"],
         "scripts": [{"language": LANGUAGES.get(l, l)} | s for l, s in c["scripts"].items()],
-        "recipients": [store.public_recipient(r) for r in recs],
+        "questions": _question_results(c["questions"], recs),
+        "recipients": [store.public_recipient(r, c["questions"]) for r in recs],
     }
 
 
 @app.post("/api/campaigns/{cid}/retry")
 def retry_non_responders(cid: str):
-    c = _get(cid)
-    with store.tx() as db:
-        n = db.execute("UPDATE recipients SET outcome = 'pending', channel = NULL, retrying = 1 "
-                       "WHERE campaign_id = ? AND in_flight = 0 AND outcome IN ('voicemail', 'no_answer')",
-                       (cid,)).rowcount
-        if n and c["status"] == "completed":
-            db.execute("UPDATE campaigns SET status = 'running' WHERE id = ?", (cid,))
-    return {"queued": n}
+    _get(cid)
+    return {"queued": store.requeue(cid)}
 
 
 class StatusChange(BaseModel):
@@ -174,6 +184,18 @@ def change_status(cid: str, body: StatusChange):
         status = "preparing"
     store.set_status(cid, status)
     return {"status": status}
+
+
+@app.delete("/api/campaigns/{cid}")
+def delete_campaign(cid: str, request: Request):
+    """Removes the campaign, its contacts and call log. A campaign that is calling must be paused first.
+    Recordings stay with Exotel and cached voice audio stays until retention runs (Phase 6)."""
+    c = _get(cid)
+    if c["status"] in ("running", "preparing"):
+        raise HTTPException(409, "Pause the campaign before deleting it")
+    store.delete_campaign(cid)
+    store.log_access("campaign.delete", cid, request.client.host if request.client else None)
+    return {"deleted": cid}
 
 
 class TestCall(BaseModel):

@@ -113,7 +113,7 @@ export function DailyChart({ daily }: { daily: Day[] }) {
   );
 }
 
-export function CampaignTable({ list, detailed }: { list: Summary[]; detailed: boolean }) {
+export function CampaignTable({ list, detailed, onDelete }: { list: Summary[]; detailed: boolean; onDelete?: (c: Summary) => void }) {
   if (!list.length) return <div className="empty"><h2>No campaigns match</h2><p>Try a different search or status.</p></div>;
   return (
     <div className="table-wrap">
@@ -121,6 +121,7 @@ export function CampaignTable({ list, detailed }: { list: Summary[]; detailed: b
         <thead><tr>
           <th>Campaign</th><th>Status</th><th>Languages</th><th className="w-outcomes">Outcomes</th>
           <th className="num">Answer rate</th><th className="num">Cost</th>{detailed && <th className="num">Started</th>}
+          {onDelete && <th><span className="sr-only">Actions</span></th>}
         </tr></thead>
         <tbody>
           {list.map(c => (
@@ -135,6 +136,17 @@ export function CampaignTable({ list, detailed }: { list: Summary[]; detailed: b
               <td className="num">{fmt.pct(c.totals.answer_rate)}</td>
               <td className="num">{fmt.inr(c.totals.cost_inr)}</td>
               {detailed && <td className="num muted">{ago(c.started_at)}</td>}
+              {onDelete && (() => {
+                const calling = c.status === "running" || (c.status as string) === "preparing";
+                return (
+                  <td className="num">
+                    <button className="btn danger sm" disabled={calling} onClick={() => onDelete(c)}
+                      aria-label={`Delete ${c.name}`} title={calling ? "Pause the campaign before deleting it" : "Delete campaign"}>
+                      <Icon name="trash" size={14} />
+                    </button>
+                  </td>
+                );
+              })()}
             </tr>
           ))}
         </tbody>

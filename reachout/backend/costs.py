@@ -19,9 +19,9 @@ DRAFT_CALL = {"template": 0.0, "chatgpt": 0.0, "ollama": 0.0, "sarvam": 0.5}  # 
 
 CHARS_PER_SEC = 14       # spoken rate used to turn script length into call length
 KEYPRESS_SEC = 6         # time to listen and press a key
-ESCALATION_RATE = 0.08   # share of answered calls that press 4 for the assistant
+ESCALATION_RATE = 0.08   # share of answered calls that ask the assistant a question at the end
 PICKUP = {"seminar": .58, "clinic": .71, "school": .64, "payment": .49}
-SPOKEN = ("greeting", "message", "menu", "goodbye")
+SPOKEN = ("greeting", "message", "menu", "doubts", "goodbye")  # doubts: only with the assistant on
 
 
 def recipient_cost(r: dict) -> float:
@@ -36,8 +36,12 @@ def recipient_cost(r: dict) -> float:
     return cost
 
 
+def _spoken(s: dict, fields=SPOKEN) -> int:
+    return sum(len(s.get(f, "")) for f in fields) + sum(len(t) for t in (s.get("questions") or {}).values())
+
+
 def estimate(*, kind: str, by_language: dict[str, int], scripts: dict[str, dict], max_attempts: int,
-             escalation: bool, voice: str, text: str, avg_name_chars: float = 8) -> dict:
+             escalation: bool, voice: str, text: str, questions: int = 0, avg_name_chars: float = 8) -> dict:
     """Expected campaign cost before launch, with the assumptions shown to the user."""
     p = PICKUP.get(kind, .6)
     m = max(1, max_attempts)
@@ -49,11 +53,11 @@ def estimate(*, kind: str, by_language: dict[str, int], scripts: dict[str, dict]
     longest = 0.0
     for lang, count in by_language.items():
         s = scripts.get(lang, {})
-        seconds = sum(len(s.get(f, "")) for f in SPOKEN) / CHARS_PER_SEC + KEYPRESS_SEC
+        seconds = _spoken(s) / CHARS_PER_SEC + KEYPRESS_SEC * (1 + questions)  # follow-ups: one key each
         longest = max(longest, seconds)
         answered_call = COST["answered"] * max(1, math.ceil(seconds / 60))
         telephony += count * (answered_each * answered_call + (attempts_each - answered_each) * COST["unanswered"])
-        synth_chars += sum(len(s.get(f, "")) for f in (*SPOKEN, "voicemail")) + count * (avg_name_chars + 4)
+        synth_chars += _spoken(s, (*SPOKEN, "voicemail")) + count * (avg_name_chars + 4)
 
     answered = n * answered_each
     agent = answered * ESCALATION_RATE * COST["agent_extra"] if escalation else 0.0
@@ -64,7 +68,7 @@ def estimate(*, kind: str, by_language: dict[str, int], scripts: dict[str, dict]
     lines = [
         {"label": "Phone calls", "detail": f"About {round(n * attempts_each):,} calls, {round(answered):,} expected to answer", "inr": telephony},
         {"label": "Voice pre-synthesis", "detail": f"{round(synth_chars):,} characters, once per language plus each name", "inr": synth},
-        {"label": "Assistant escalations", "detail": f"About {ESCALATION_RATE:.0%} of answered calls press 4" if escalation else "Off: keypad only", "inr": agent},
+        {"label": "Assistant escalations", "detail": f"About {ESCALATION_RATE:.0%} of answered calls ask a question at the end" if escalation else "Off: keypad only", "inr": agent},
         {"label": "Script drafting", "detail": "One language-model call for the whole campaign", "inr": draft},
     ]
     return {

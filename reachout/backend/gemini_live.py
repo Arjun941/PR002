@@ -1,4 +1,4 @@
-"""Gemini Live as the key-4 assistant: a drop-in alternative to the ElevenLabs agent.
+"""Gemini Live as the call's question assistant: a drop-in alternative to the ElevenLabs agent.
 
 Same contract as elevenlabs.bridge(): connect the caller to the agent until either side hangs up.
 Audio is PCM16 8 kHz mono on the telephony side; Gemini takes 16 kHz and answers at 24 kHz, so we
@@ -63,26 +63,30 @@ class Resampler:
 
 def system_prompt(variables: dict[str, str], language: str) -> str:
     when = variables.get("when", "")
+    answer = variables.get("answer", "")
+    gave = f"They answered the automated menu with: {answer}. " if answer else ""
     facts = "\n".join(f"- {k}: {v}" for k, v in (
         ("Organisation", variables.get("org")), ("About", variables.get("title")), ("When", when),
         ("Where", variables.get("venue")), ("Details", variables.get("details"))) if v)
     return (
         "You are a phone assistant for an organisation that has just called someone with an automated "
-        "message. The person pressed 4 to speak to you. Be warm, brief and natural, like a helpful receptionist: "
+        f"message. {gave}At the end of the call they were asked if they have any other questions and started "
+        "speaking, so you answer them. Be warm, brief and natural, like a helpful receptionist: "
         "one or two short sentences at a time, no lists, no markdown. Let the caller talk.\n"
         f"Reply in {variables.get('language') or language}, and switch if the caller does.\n"
         f"What the call was about:\n{facts or '- (no details given)'}\n"
         "Answer questions using only these facts; if you do not know, say someone will follow up. "
         "When the caller clearly confirms they will attend or pay, declines, or wants to reschedule, call "
         "the record_outcome tool with confirmed, declined or rescheduled, then say a short goodbye. "
-        "Start by saying hello and asking how you can help."
+        "Their first words reach you straight away: answer them without a greeting. If you hear nothing, ask how you can help."
     )
 
 
 async def bridge(recv: Callable[[], Awaitable[dict | None]], send_audio: Callable[[bytes], Awaitable[None]],
                  clear: Callable[[], Awaitable[None]], variables: dict[str, str], language: str,
-                 on_outcome: Callable[[str], bool]) -> None:
-    """recv() yields Exotel events (None when the call ends); audio is PCM16 8 kHz both ways."""
+                 on_outcome: Callable[[str], bool], preroll: bytes = b"") -> None:
+    """recv() yields Exotel events (None when the call ends); audio is PCM16 8 kHz both ways.
+    preroll: what the caller already said before we were connected; it is sent first."""
     from google import genai
     from google.genai import types
 
@@ -97,9 +101,13 @@ async def bridge(recv: Callable[[], Awaitable[dict | None]], send_audio: Callabl
     )
     up, down = Resampler(8000, 16000), Resampler(24000, 8000)
     async with client.aio.live.connect(model=model(), config=config) as session:
-        await session.send_client_content(
-            turns=types.Content(role="user", parts=[types.Part(text="The caller just pressed 4. Greet them.")]),
-            turn_complete=True)
+        if preroll:  # the question they started asking; Gemini ends the turn when the live audio goes quiet
+            for i in range(0, len(preroll), 640):
+                await session.send_realtime_input(audio=types.Blob(data=up(preroll[i:i + 640]), mime_type="audio/pcm;rate=16000"))
+        else:
+            await session.send_client_content(
+                turns=types.Content(role="user", parts=[types.Part(text="The caller just joined. Greet them briefly.")]),
+                turn_complete=True)
         log.info("gemini live assistant connected (%s)", model())
 
         async def caller_to_agent() -> None:

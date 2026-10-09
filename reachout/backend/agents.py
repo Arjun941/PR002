@@ -1,4 +1,4 @@
-"""Live assistants for key 4 (the only part of a call that is conversational), pluggable per campaign.
+"""Live assistants for questions at the end of a call (the only conversational part), pluggable per campaign.
 
 Every provider exposes `bridge(recv, send_audio, clear, variables, language, on_outcome)` (see
 elevenlabs.bridge) and says where the caller's voice goes. Add a provider by adding a module with that
@@ -13,9 +13,9 @@ from . import elevenlabs, gemini_live
 
 PROVIDERS = {
     "gemini": dict(label="Gemini Live", region="Google (global)", setup="GEMINI_API_KEY",
-                   sends="Callers who press 4: their voice goes to Google (Gemini Live)"),
+                   sends="Callers who ask a question at the end: their voice goes to Google (Gemini Live)"),
     "elevenlabs": dict(label="ElevenLabs agent", region="United States", setup="ELEVENLABS_API_KEY, ELEVENLABS_AGENT_ID",
-                       sends="Callers who press 4: their voice goes to ElevenLabs, USA"),
+                       sends="Callers who ask a question at the end: their voice goes to ElevenLabs, USA"),
 }
 
 

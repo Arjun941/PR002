@@ -4,7 +4,7 @@
 
 What it sets up on your ElevenLabs account:
   - an agent named "Reachout assistant" whose prompt uses the dynamic variables the app sends at call
-    start ({{org}} {{title}} {{when}} {{venue}} {{details}} {{language}}),
+    start ({{org}} {{title}} {{when}} {{venue}} {{details}} {{language}} {{answer}}),
   - a client tool `record_outcome(outcome)` that the app handles (backend/elevenlabs.py),
   - per-conversation overrides for language and first message, so one agent serves every campaign.
 It then writes ELEVENLABS_AGENT_ID (and ELEVENLABS_VOICE_ID, if empty) to .env. Safe to re-run: an agent
@@ -26,8 +26,10 @@ NAME = "Reachout assistant"
 VOICE = os.getenv("SETUP_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")  # Sarah: mature, reassuring (premade, on every plan)
 
 PROMPT = """You are a phone assistant for {{org}}. You have just called someone with an automated message about \
-"{{title}}", and they pressed 4 to speak to a person. Be warm, brief and natural, like a helpful receptionist: one or two \
-short sentences at a time, no lists, no markdown, and let the caller talk.
+"{{title}}". They answered the automated menu with: {{answer}}. At the end they were asked if they have any other questions \
+and started speaking, so you answer them: their first words reach you as soon as you connect, so do not greet them. Be warm, \
+brief and natural, like a helpful receptionist: one or two short sentences at a time, no lists, no markdown, and let the \
+caller talk.
 
 What the call was about:
 - Organisation: {{org}}
@@ -44,7 +46,7 @@ CONFIG = {
     "name": NAME,
     "conversation_config": {
         "agent": {
-            "first_message": "Hello, this is the assistant for {{org}}. How can I help you with {{title}}?",
+            "first_message": "",  # empty: the agent waits; the caller's first words arrive as preroll audio
             "language": "en",
             "prompt": {
                 "prompt": PROMPT,
