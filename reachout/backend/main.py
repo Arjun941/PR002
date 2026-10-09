@@ -198,6 +198,7 @@ def change_status(cid: str, body: StatusChange):
 class CampaignEdit(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=80)
     provider: Literal["elevenlabs", "gemini"] | None = None
+    mode: Literal["live", "hybrid"] | None = None
     system_prompt: str | None = Field(None, min_length=1, max_length=MAX_PROMPT)
     retry: Retry | None = None
     scripts: dict[str, Script] | None = None
@@ -206,25 +207,35 @@ class CampaignEdit(BaseModel):
 
 @app.patch("/api/campaigns/{cid}")
 def edit_campaign(cid: str, body: CampaignEdit):
-    """Edit a campaign that is not calling: name, provider, agent system prompt, retry policy and the
-    scripts. Contacts, languages, questions and the mode are fixed once created. New scripts on a hybrid
-    campaign need their audio synthesised again, so it goes back to 'preparing' when resumed."""
+    """Edit a campaign that is not calling: name, provider, mode, agent system prompt, retry policy and the
+    scripts, and new follow-up questions (existing ones are fixed: answers are saved against their options). Contacts
+    and languages are fixed once created. A hybrid campaign whose scripts changed (or
+    that just became hybrid) goes back to 'preparing' when resumed, to synthesise what is missing."""
     c = _get(cid)
     if c["status"] in ("running", "preparing"):
         raise HTTPException(409, "Pause the campaign before editing it")
     changes: dict = {}
+    provider = c["provider"] or c["agent_provider"]
+    mode = body.mode or c["mode"]
     if body.name is not None:
         changes["name"] = body.name.strip()
     if body.system_prompt is not None:
         changes["system_prompt"] = body.system_prompt.strip()
     if body.retry is not None:
         changes["retry"] = body.retry.model_dump()
-    if body.provider is not None and body.provider != (c["provider"] or c["agent_provider"]):
-        if not catalog.ready(body.provider, "live"):
-            raise HTTPException(400, f"{catalog.label(body.provider)} is not set up for live calls "
-                                     f"(set {', '.join(catalog.missing(body.provider, 'live'))})")
-        changes |= {"provider": body.provider, "agent_provider": body.provider,
-                    "handling": handling(body.provider, c["mode"], c["voice"] or body.provider)}
+    if body.provider is not None and body.provider != provider:
+        provider = body.provider
+        changes |= {"provider": provider, "agent_provider": provider}
+    if provider != (c["provider"] or c["agent_provider"]) or mode != c["mode"]:
+        if not catalog.ready(provider, "live"):
+            raise HTTPException(400, f"{catalog.label(provider)} is not set up for live calls "
+                                     f"(set {', '.join(catalog.missing(provider, 'live'))})")
+    voice = c["voice"]
+    if mode == "hybrid" and mode != c["mode"]:
+        voice = audio.choose_voice(c)
+        if not voice:
+            raise HTTPException(400, "Hybrid mode makes its IVR audio with ElevenLabs: set ELEVENLABS_API_KEY and "
+                                     "ELEVENLABS_VOICE_ID")
     questions = c["questions"]
     if body.questions is not None:
         have = {q["id"]: q for q in c["questions"]}
@@ -239,25 +250,28 @@ def edit_campaign(cid: str, body: CampaignEdit):
             raise HTTPException(400, f"At most {llm.MAX_QUESTIONS} follow-up questions")
         if questions != c["questions"]:
             changes["questions"] = questions
-    if body.scripts is not None or "questions" in changes:
-        scripts_in = body.scripts if body.scripts is not None else {l: Script(**{k: s[k] for k in Script.model_fields if k in s}) for l, s in c["scripts"].items()}
-        if set(scripts_in) != set(c["scripts"]):
-            raise HTTPException(400, "Scripts must cover exactly this campaign's languages")
-        new = {}
-        ids = {q["id"] for q in questions}
-        for lang, sc in scripts_in.items():
-            old = c["scripts"][lang]
-            merged = old | sc.model_dump(exclude={"questions"})
-            texts = {k: v for k, v in (old.get("questions", {}) | sc.questions).items() if k in ids}
-            if any(not texts.get(q["id"], "").strip() for q in questions):
-                raise HTTPException(400, f"Every follow-up question needs its spoken text ({LANGUAGES.get(lang, lang)})")
-            if c["escalation"] and not merged.get("doubts", "").strip():
-                raise HTTPException(400, f"The closing question is empty ({LANGUAGES.get(lang, lang)})")
-            new[lang] = merged | {"questions": texts}
-        if new != c["scripts"]:
-            changes["scripts"] = new
-            if c["mode"] == "hybrid" and not c["simulated"]:
-                changes["audio_ready"] = False  # resuming re-synthesises only the phrases that changed
+    ids = {q["id"] for q in questions}
+    scripts_in = body.scripts if body.scripts is not None else None
+    if scripts_in is not None and set(scripts_in) != set(c["scripts"]):
+        raise HTTPException(400, "Scripts must cover exactly this campaign's languages")
+    new = {}
+    for lang, old in c["scripts"].items():
+        sc = scripts_in[lang] if scripts_in is not None else None
+        merged = old | sc.model_dump(exclude={"questions"}) if sc else dict(old)
+        texts = {k: v for k, v in (old.get("questions", {}) | (sc.questions if sc else {})).items() if k in ids}
+        if any(not texts.get(q["id"], "").strip() for q in questions):
+            raise HTTPException(400, f"Every follow-up question needs its spoken text ({LANGUAGES.get(lang, lang)})")
+        if mode == "hybrid" and not (merged.get("doubts") or "").strip():
+            raise HTTPException(400, f"Write the closing question (any other questions?) for {LANGUAGES.get(lang, lang)}")
+        new[lang] = merged | {"questions": texts}
+    if new != c["scripts"]:
+        changes["scripts"] = new
+    if mode != c["mode"]:
+        changes |= {"mode": mode, "escalation": int(mode == "hybrid"), "voice": voice}
+    if "handling" not in changes and ({"provider", "mode"} & set(changes)):
+        changes["handling"] = handling(provider, mode, voice or provider)
+    if mode == "hybrid" and not c["simulated"] and ("scripts" in changes or mode != c["mode"]):
+        changes["audio_ready"] = False  # resuming synthesises only what is missing
     if changes:
         store.update_campaign(cid, changes)
     return {"updated": sorted(changes)}
