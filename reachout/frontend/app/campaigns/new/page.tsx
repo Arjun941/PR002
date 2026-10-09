@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, post } from "@/lib/api";
 import { fmt, KIND } from "@/lib/format";
 import {
-  PREFILL_KEY, SCRIPT_FIELDS, questionText, type Prefill, type Question, type BuilderOptions, type ContactsCheck, type Draft, type Estimate, type EventDetails,
+  PREFILL_KEY, SCRIPT_FIELDS, questionText, type Prefill, type Question, type BuilderOptions, type ContactsCheck, type Draft, type Detail, type EventDetails,
   type AgentEdits, type Mode, type ProviderKey, type Script,
 } from "@/lib/types";
 import { useData } from "@/components/hooks";
@@ -47,7 +47,7 @@ export default function NewCampaignPage() {
   const [draft, setDraft] = useState<{ key: string; d: Draft; warnings: string[] } | null>(null);
   const [name, setName] = useState("");
   const [tab, setTab] = useState("en");
-  const [est, setEst] = useState<{ key: string; e: Estimate } | null>(null);
+  const [info, setInfo] = useState<{ key: string; h: Detail["handling"] } | null>(null);  // where the data is processed
   const [reviewed, setReviewed] = useState(false);
   const [busy, setBusy] = useState<"" | "draft" | "contacts">("");
 
@@ -100,21 +100,17 @@ export default function NewCampaignPage() {
     [l, { ...Object.fromEntries(SCRIPT_FIELDS.map(f => [f, d.scripts[l][f]])),
       questions: Object.fromEntries(questions.map(q => [q.id, d.scripts[l].questions?.[q.id] ?? ""])),
       ...(asks ? { doubts: d.scripts[l].doubts ?? "" } : {}) }])) : {};
-  const estBody = d && contacts ? {
-    kind: ev.kind, by_language: contacts.by_language, scripts: scriptsBody, retry: d.retry, questions,
-    provider, mode,
-  } : null;
-  const estKey = JSON.stringify(estBody);
+  const infoKey = `${provider}:${mode}`;
 
   useEffect(() => {
-    if (step !== 3 || !estBody) return;
+    if (step !== 3 || !provider) return;
     let live = true;
-    post<Estimate>("/builder/estimate", estBody)
-      .then(e => { if (live) setEst({ key: estKey, e }); })
+    post<{ handling: Detail["handling"] }>("/builder/handling", { provider, mode })
+      .then(r => { if (live) setInfo({ key: infoKey, h: r.handling }); })
       .catch(e => { if (live) toast((e as Error).message, "error"); });
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, estKey]);
+  }, [step, infoKey]);
 
   if (error !== null) return <main className="view"><ErrorView status={error} retry={retry} /></main>;
   if (!opts) return <main className="view"><Skeleton /></main>;
@@ -122,7 +118,7 @@ export default function NewCampaignPage() {
   const langName = (c: string) => opts.languages.find(l => l.code === c)?.name ?? c;
   const voiceReady = opts.providers.some(p => p.caps.voice.ready);  // IVR audio is always ElevenLabs
   const unusable = !prov || !prov.caps.live.ready || (hybrid && !voiceReady);
-  const estimate = est?.key === estKey ? est.e : null;
+  const hinfo = info?.key === infoKey ? info.h : null;
   const ok = [
     !!ev.title.trim() && !!ev.kind.trim() && langs.length > 0,
     !!contacts && contacts.count > 0 && contacts.error_count === 0,
@@ -201,7 +197,7 @@ export default function NewCampaignPage() {
         ...Object.fromEntries(SCRIPT_FIELDS.map(f => [f, d.scripts[l][f]])), doubts: d.scripts[l].doubts ?? "", questions: d.scripts[l].questions ?? {} }])) : null,
       questions: d?.questions ?? [],
       contacts: contacts ? { count: contacts.count, by_language: contacts.by_language, segments: contacts.segments } : null,
-      estimate_total_inr: estimate?.total_inr ?? null, draft_notes: d?.notes || null,
+      draft_notes: d?.notes || null,
     }),
     apply: (e: AgentEdits, actions: string[]) => {
       const done: string[] = [];
@@ -245,7 +241,7 @@ export default function NewCampaignPage() {
   };
 
   const launch = () => {
-    if (!d || !contacts || !estimate) return;
+    if (!d || !contacts) return;
     modal({
       title: "Start calling?",
       body: (
@@ -260,7 +256,6 @@ export default function NewCampaignPage() {
             <div><dt>Languages</dt><dd>{langs.map(langName).join(", ")}</dd></div>
             <div><dt>Retries</dt><dd>Up to {d.retry.max_attempts} attempts, {d.retry.gap_hours} h apart</dd></div>
             <div><dt>Follow-up questions</dt><dd>{questions.length ? questions.map(q => q.label).join(", ") : "None"}</dd></div>
-            <div><dt>Estimated cost</dt><dd>{fmt.inr2(estimate.total_inr)}</dd></div>
           </dl>
         </>
       ),
@@ -279,7 +274,7 @@ export default function NewCampaignPage() {
 
   return (
     <main className="view enter">
-      <PageHead title="New campaign" sub="Describe the event, add contacts, review the drafted scripts and the cost, then launch." />
+      <PageHead title="New campaign" sub="Describe the event, add contacts, review the drafted scripts, then launch." />
 
       <nav className="steps" aria-label="Steps">
         {STEPS.map((label, i) => (
@@ -357,11 +352,11 @@ export default function NewCampaignPage() {
               <button className={`choice${hybrid ? " on" : ""}`} aria-pressed={hybrid} onClick={() => setMode("hybrid")}>
                 <b>Hybrid{!voiceReady && <em>ElevenLabs not set up</em>}</b>
                 <small>Pre-synthesised IVR (always ElevenLabs voice) with the keypad: greeting, message, menu and follow-up questions. It then asks if they
-                  have any further questions, and the agent takes over only if they do. Cheapest per call.</small>
+                  have any further questions, and the agent takes over only if they do.</small>
               </button>
               <button className={`choice${!hybrid ? " on" : ""}`} aria-pressed={!hybrid} onClick={() => setMode("live")}>
                 <b>Live</b>
-                <small>The agent takes over the whole call and talks it through with them. Most natural, costs the most.</small>
+                <small>The agent takes over the whole call and talks it through with them. The most natural conversation.</small>
               </button>
             </div>
             <span className="hint">Calls ring the phone page (/phone): {opts.phones ? `${opts.phones} online now.` : "none online yet."}</span>
@@ -536,38 +531,18 @@ export default function NewCampaignPage() {
         </>
       ))}
 
-      {step === 3 && d && contacts && (!estimate ? <Skeleton /> : (
+      {step === 3 && d && contacts && (!hinfo ? <Skeleton /> : (
         <>
-          <section className="grid-2">
-            <div className="card">
-              <div className="card-head"><h2>Estimated cost</h2></div>
-              <dl className="facts cost-lines" style={{ margin: 16 }}>
-                {estimate.lines.map(l => (
-                  <div key={l.label}><dt>{l.label}<small>{l.detail}</small></dt><dd>{fmt.inr2(l.inr)}</dd></div>
-                ))}
-                <div className="total"><dt>Total<small>{fmt.inr2(estimate.per_recipient_inr)} per recipient</small></dt><dd>{fmt.inr2(estimate.total_inr)}</dd></div>
-              </dl>
-              <div className="compare">
-                <span>The same campaign with a voice agent on every answered call</span>
-                <span>{fmt.inr2(estimate.all_agent_inr)} · <b>{fmt.pct(1 - estimate.total_inr / Math.max(estimate.all_agent_inr, 0.01))} saved</b></span>
-              </div>
-            </div>
-            <div className="card">
-              <div className="card-head"><h2>{name}</h2><span className="chip">{KIND[ev.kind] || ev.kind}</span></div>
-              <dl className="facts" style={{ margin: 16 }}>
-                <div><dt>Recipients</dt><dd>{fmt.int(contacts.count)}</dd></div>
-                <div><dt>Languages</dt><dd>{langs.map(langName).join(", ")}</dd></div>
-                <div><dt>Retries</dt><dd>Up to {d.retry.max_attempts} attempts, {d.retry.gap_hours} h apart</dd></div>
-                <div><dt>Expected answers</dt><dd>{fmt.int(estimate.expected_answered)} of {fmt.int(estimate.recipients)}</dd></div>
-                <div><dt>Provider</dt><dd>{prov?.label}, {hybrid ? "hybrid" : "live"} mode</dd></div>
-              </dl>
-              <p className="muted" style={{ padding: "0 16px 16px", fontSize: 12 }}>
-                Assumes {fmt.pct(estimate.assumptions.pickup)} pick up per attempt and calls of about {estimate.assumptions.call_seconds} s.
-                Rates are estimates until the first bill.
-              </p>
-            </div>
+          <section className="card">
+            <div className="card-head"><h2>{name}</h2><span className="chip">{KIND[ev.kind] || ev.kind}</span></div>
+            <dl className="facts" style={{ margin: 16 }}>
+              <div><dt>Recipients</dt><dd>{fmt.int(contacts.count)}</dd></div>
+              <div><dt>Languages</dt><dd>{langs.map(langName).join(", ")}</dd></div>
+              <div><dt>Retries</dt><dd>Up to {d.retry.max_attempts} attempts, {d.retry.gap_hours} h apart</dd></div>
+              <div><dt>Provider</dt><dd>{prov?.label}, {hybrid ? "hybrid" : "live"} mode</dd></div>
+            </dl>
           </section>
-          <HandlingCard h={estimate.handling} title="Where this campaign's data is processed" />
+          <HandlingCard h={hinfo} title="Where this campaign's data is processed" />
           <div className="stack-gap">
             {placeholders.length > 0 && (
               <Notice>{placeholders.map(langName).join(", ")} still {placeholders.length > 1 ? "use" : "uses"} the English placeholder.
@@ -597,7 +572,7 @@ export default function NewCampaignPage() {
             {busy === "contacts" && <span className="spinner" />}Next: {STEPS[step + 1]}
           </button>
         ) : (
-          <button className="btn primary" disabled={!reviewed || !estimate || unusable} onClick={launch}>
+          <button className="btn primary" disabled={!reviewed || !hinfo || unusable} onClick={launch}>
             <Icon name="phone" />Launch
           </button>
         )}

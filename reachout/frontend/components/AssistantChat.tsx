@@ -24,7 +24,7 @@ const GREETINGS: Record<Scope, Turn> = {
   },
   campaign: {
     role: "assistant", greeting: true,
-    content: "I remember everything about this campaign and can edit it while it is paused or finished: name, provider, mode, retries, event details, system prompt and scripts. Ask me anything about it or tell me what to change.",
+    content: "I remember everything about this campaign and can edit it while it is paused or finished: name, provider, mode, retries, event details, system prompt, scripts, follow-up questions, languages and contacts. Ask me anything about it or tell me what to change.",
   },
 };
 

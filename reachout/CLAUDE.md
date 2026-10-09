@@ -7,7 +7,7 @@ reminders). Telephony was Exotel; it was removed for now (2026-10-09, on request
 ## Design principles (do not drift from these)
 
 1. Cost is a feature. Target users are schools, clinics and small institutions. The cheapest AI
-   minute is the one never run.
+   minute is the one never run. (The app itself shows no cost figures or estimates: removed on request, 2026-10-10.)
 2. Hybrid call flow, keypad first:
    greet -> play pre-synthesised message -> collect DTMF (1 confirm, 2 decline, 3 reschedule)
    -> per-event follow-up keypad questions -> (assistant on) "any other questions?" and a short
@@ -55,7 +55,7 @@ reminders). Telephony was Exotel; it was removed for now (2026-10-09, on request
   campaigns into an empty DB and simulates calls for campaigns flagged `simulated` (`backend/demo.py`).
 - Phase 4: builder API in `backend/builder.py`, drafting in `backend/llm.py` (Gemini / built-in
   templates; non-English template output is flagged as an English placeholder), rates and estimate in
-  `backend/costs.py`, UI at `frontend/app/campaigns/new`. Launch is refused unless the dialer is ready
+  UI at `frontend/app/campaigns/new`. Launch is refused unless the dialer is ready
   (removed with Exotel: campaigns now launch without telephony setup).
 - Phase 5: `backend/dialer.py` places calls (concurrency, `CALL_WINDOW`, retry policy, pause on
   auth/network errors) and handles `POST /api/telephony/status`; the voicebot saves DTMF 1/2/3 by
@@ -142,7 +142,7 @@ reminders). Telephony was Exotel; it was removed for now (2026-10-09, on request
   `resynthesize`; event, name, provider, mode, retry, system prompt, scripts) and saves the chat on the campaign
   (`chat`, `chat_summary`; oldest turns are folded into the summary after `SUMMARISE_AT`). The create-scope chat is carried
   to the builder (sessionStorage `reachout.chat`) and saved on the campaign at creation (`CreateReq.chat`), so the agent on
-  the campaign page continues it. Contacts, languages and questions of a created campaign stay fixed.
+  the campaign page continues it. Everything on a created campaign is editable (it must be paused or finished), by hand (Edit page, per-question Save button) and by the agent (`question_ops`: add/update/remove). Changing or removing options keeps saved answers meaningful: `main._remap_answers` moves each saved key press to its option's new position by text, keeps it for an in-place rename, and clears it if the option is gone. A new or changed question's spoken text is translated into every language (`/builder/translate-question`) unless the agent wrote it.
   Verified via the API (builder + campaign scopes, memory across turns); the UI wiring is type-checked but not clicked through.
 
 ## Roadmap
@@ -155,12 +155,12 @@ reminders). Telephony was Exotel; it was removed for now (2026-10-09, on request
       pre-synthesised templates, voicemail handling, persistent storage (SQLite) replacing the in-memory mock data.
 - [~] Phase 3 (ElevenLabs agent at the end of the call, untested on a real call): conversational escalation. Consider Pipecat or LiveKit Agents as the pipeline;
       write only the Exotel transport. Providers: ElevenLabs and Gemini (Sarvam postponed).
-- [x] Phase 4: campaign builder (paste event details, pick languages, review drafts, cost estimate
+- [x] Phase 4: campaign builder (paste event details, pick languages, review drafts
       before launch, launch).
 - [~] Phase 5 (code written; real-call path tested only against a mocked Exotel): dashboard on real
       data; recording playback behind access control.
-- [ ] Phase 6: encryption at rest, retention and auto-delete, access logs, README with the cost
-      comparison and architecture.
+- [ ] Phase 6: encryption at rest, retention and auto-delete, access logs, README with the
+      architecture.
 
 ## Conventions
 
@@ -174,3 +174,10 @@ reminders). Telephony was Exotel; it was removed for now (2026-10-09, on request
 - Run the app: `uvicorn backend.main:app --reload` (API on :8000) and, in `frontend/`, `npm install` then
   `npm run dev`; open http://localhost:3000. Set `BACKEND_URL` if the API is elsewhere.
 - When adding a feature, update the roadmap checkboxes above.
+
+- Languages and contacts of an existing campaign are editable (Edit page sections save straight away; the agent via `languages` and
+  `contact_ops`). `PATCH /api/campaigns/{id}` with `languages`: new ones get the script translated (`llm.translate_scripts`, one
+  call, flagged if a language came back unusable); removing one is refused while contacts still use it. `POST /api/campaigns/{id}/contacts`
+  adds (CSV), updates (name/language/segment) and removes contacts; removing erases the contact's call log, history and recordings. A
+  finished campaign that gets new contacts becomes paused. The agent sees only contact counts, never names or numbers; it targets people
+  with filters (language, segment, outcome, name_contains) and never bulk-changes without one.

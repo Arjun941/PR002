@@ -4,7 +4,7 @@ export type Status = "preparing" | "running" | "completed" | "paused";
 
 export interface Totals {
   recipients: number; contacted: number; calls_placed: number; answered: number;
-  answer_rate: number; confirm_rate: number; cost_inr: number; counts: Counts;
+  answer_rate: number; confirm_rate: number; counts: Counts;
   retryable: number; retrying: number;
 }
 export interface Summary {
@@ -46,14 +46,14 @@ export interface Question { id: string; label: string; options: string[]; only_i
 export interface QuestionResult extends Question {
   answered: number; results: { key: string; label: string; count: number }[];
 }
-export const MAX_QUESTIONS = 4, MIN_OPTIONS = 2, MAX_OPTIONS = 6;
+export const MAX_QUESTIONS = 500, MIN_OPTIONS = 2, MAX_OPTIONS = 6;
 /** English fallback for a question's spoken text (same wording as the backend's). */
 export const questionText = (q: Question) =>
   `${q.label}. Press ${q.options.map((o, i) => `${i + 1} for ${o}`).join(", ")}.`;
 export interface Detail extends Summary {
   by_language: Group[]; by_segment: Group[];
   handling: { audio: Handling; text: Handling; recordings: Handling };
-  retry_estimate_inr: number; retry_policy: RetryPolicy; note: string | null;
+  retry_policy: RetryPolicy; note: string | null;
   provider: ProviderKey; mode: Mode; voice: string; system_prompt: string;
   ivr: Record<string, Record<string, boolean>>; synthesising: boolean;
   scripts: (Script & { language: string; code: string })[];
@@ -113,11 +113,4 @@ export interface ContactsCheck {
   count: number; by_language: Record<string, number>; segments: Record<string, number>;
   errors: { line: number; error: string }[]; error_count: number;
   preview: { name: string; phone: string; language: string; segment: string }[];
-}
-export interface Estimate {
-  lines: { label: string; detail: string; inr: number }[];
-  total_inr: number; per_recipient_inr: number; recipients: number;
-  expected_calls: number; expected_answered: number; all_agent_inr: number;
-  assumptions: { pickup: number; max_attempts: number; call_seconds: number; escalation_rate: number };
-  handling: Detail["handling"];
 }

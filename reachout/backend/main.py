@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -20,8 +21,8 @@ from pydantic import BaseModel, Field
 
 from . import assistant, audio, demo, dialer, store, stt
 from . import callctx, campaignagent, catalog, chatgpt, llm, recstore
-from .builder import DEMO, MAX_PROMPT, ChatTurnIn, Event, Question, Retry, Script, handling, router as builder_router
-from .costs import RETRY_ESTIMATE_PER_CALL, recipient_cost
+from .builder import (DEMO, MAX_CONTACTS, MAX_PROMPT, ChatTurnIn, Event, Question, Retry, Script, TranslateReq, handling,
+                      parse_contacts, router as builder_router, translate_question)
 from .providers import router as providers_router
 from .history import latest_by_recipient, router as history_router
 from .recordings import router as recordings_router
@@ -33,19 +34,17 @@ from .webphone import router as webphone_router
 def _totals(recs: list[dict]) -> dict:
     counts = {k: 0 for k in OUTCOMES}
     calls = contacted = retrying = 0
-    cost = 0.0
     for r in recs:
         counts[r["outcome"]] += 1
         calls += r["attempts"]
         contacted += r["attempts"] > 0
         retrying += bool(r["retrying"])
-        cost += recipient_cost(r)
     answered = sum(counts[k] for k in ANSWERED)
     return {
         "recipients": len(recs), "contacted": contacted, "calls_placed": calls, "answered": answered,
         "answer_rate": answered / contacted if contacted else 0,
         "confirm_rate": counts["confirmed"] / answered if answered else 0,
-        "cost_inr": round(cost, 2), "counts": counts,
+        "counts": counts,
         "retryable": counts["voicemail"] + counts["no_answer"], "retrying": retrying,
     }
 
@@ -159,7 +158,6 @@ def campaign_detail(cid: str):
         "by_language": _group(recs, "language"),
         "by_segment": _group(recs, "segment"),
         "handling": c["handling"] | {"recordings": recstore.handling(c)},  # what is done with audio now, for older campaigns too
-        "retry_estimate_inr": round(sum(r["outcome"] in NON_RESPONDER for r in recs) * RETRY_ESTIMATE_PER_CALL, 1),
         "retry_policy": c["retry"],
         "note": c["note"],
         "provider": c["provider"] or c["agent_provider"], "mode": c["mode"], "voice": c["voice"],
@@ -205,13 +203,42 @@ class CampaignEdit(BaseModel):
     scripts: dict[str, Script] | None = None
     questions: list[Question] | None = None  # every question the campaign should have: the existing ones unchanged, plus new ones
     event: dict | None = None  # the event facts to change (merged into the current ones)
+    languages: list[str] | None = None  # the campaign's languages: new ones get their scripts translated, removed ones must have no contacts
+
+
+def _remap_answers(cid: str, old: dict[str, dict], new: dict[str, dict]) -> int:
+    """After a question's options changed, keep each saved answer pointing at the same choice. A saved answer is the number
+    of the key pressed, so it follows its option's text to the new position; if the text is gone it stays where it is
+    when the option was only renamed (same number of options) and is cleared otherwise. Returns how many were cleared."""
+    changed = [qid for qid, q in new.items() if qid in old and q["options"] != old[qid]["options"]]
+    if not changed:
+        return 0
+    cleared = 0
+    for r in store.recipients(cid):
+        saved = store.answers(r)
+        for qid in changed:
+            key = saved.get(qid, "")
+            before, after = old[qid]["options"], new[qid]["options"]
+            if not (key.isdigit() and 0 < int(key) <= len(before)):
+                continue
+            lowered = [o.strip().lower() for o in after]
+            text = before[int(key) - 1].strip().lower()
+            if text in lowered:
+                now = str(lowered.index(text) + 1)
+            elif len(after) == len(before):
+                now = key
+            else:
+                now, cleared = "", cleared + 1
+            if now != key:
+                store.set_answer(r["id"], qid, now)
+    return cleared
 
 
 @app.patch("/api/campaigns/{cid}")
 def edit_campaign(cid: str, body: CampaignEdit):
-    """Edit a campaign that is not calling: name, provider, mode, agent system prompt, retry policy and the
-    scripts, and new follow-up questions (existing ones are fixed: answers are saved against their options). Contacts
-    and languages are fixed once created. A hybrid campaign whose scripts changed (or
+    """Edit a campaign that is not calling: name, provider, mode, agent system prompt, retry policy, event facts, the
+    scripts and the follow-up questions (add, change, remove; saved answers are remapped to the changed options, see
+    _remap_answers). Contacts and languages are fixed once created. A hybrid campaign whose scripts changed (or
     that just became hybrid) goes back to 'preparing' when resumed, to synthesise what is missing."""
     c = _get(cid)
     if c["status"] in ("running", "preparing"):
@@ -246,26 +273,44 @@ def edit_campaign(cid: str, body: CampaignEdit):
             raise HTTPException(400, "Hybrid mode makes its IVR audio with ElevenLabs: set ELEVENLABS_API_KEY and "
                                      "ELEVENLABS_VOICE_ID")
     questions = c["questions"]
+    remap: tuple[dict, dict] | None = None
     if body.questions is not None:
-        have = {q["id"]: q for q in c["questions"]}
-        sent = {q.id: q.model_dump() for q in body.questions}
-        if len(sent) != len(body.questions):
+        sent = [q.model_dump() for q in body.questions]
+        if len({q["id"] for q in sent}) != len(sent):
             raise HTTPException(400, "Two questions have the same id")
-        for qid, old in have.items():  # existing questions already have answers saved against their options: keep them as they are
-            if sent.get(qid) != {k: old.get(k) for k in ("id", "label", "options", "only_if_confirmed")}:
-                raise HTTPException(400, f"Question “{old['label']}” cannot be changed or removed; add new questions instead")
-        questions = [q.model_dump() for q in body.questions]
-        if len(questions) > llm.MAX_QUESTIONS:
+        if len(sent) > llm.MAX_QUESTIONS:
             raise HTTPException(400, f"At most {llm.MAX_QUESTIONS} follow-up questions")
+        questions = sent
         if questions != c["questions"]:
             changes["questions"] = questions
+            remap = ({q["id"]: q for q in c["questions"]}, {q["id"]: q for q in questions})
     ids = {q["id"] for q in questions}
+    langs_now = list(c["languages"])
+    target = list(dict.fromkeys(body.languages)) if body.languages is not None else langs_now
+    if not target or any(l not in LANGUAGES for l in target):
+        raise HTTPException(400, "Pick at least one known language")
+    removed, added = [l for l in langs_now if l not in target], [l for l in target if l not in langs_now]
+    if removed:
+        stuck = [r for r in store.recipients(cid) if r["language"] in removed]
+        if stuck:
+            raise HTTPException(400, f"{len(stuck)} contact(s) use {', '.join(LANGUAGES[l] for l in removed)}: change their language "
+                                     "or remove them first")
     scripts_in = body.scripts if body.scripts is not None else None
-    if scripts_in is not None and set(scripts_in) != set(c["scripts"]):
-        raise HTTPException(400, "Scripts must cover exactly this campaign's languages")
+    if scripts_in is not None and not set(scripts_in) <= set(target):
+        raise HTTPException(400, "Scripts must be for this campaign's languages")
+    warnings: list[str] = []
+    generated: dict = {}
+    need = [l for l in added if not (scripts_in and l in scripts_in)]
+    if need:  # a new language: its script is the existing one, translated (one model call)
+        src_lang = next(l for l in target if l in c["scripts"])
+        try:
+            generated, warnings = llm.translate_scripts(c["scripts"][src_lang], c["event"] or {}, need, questions, provider)
+        except Exception as exc:
+            raise HTTPException(502, f"Could not translate the scripts into the new language ({type(exc).__name__})")
     new = {}
-    for lang, old in c["scripts"].items():
-        sc = scripts_in[lang] if scripts_in is not None else None
+    for lang in target:
+        old = c["scripts"].get(lang) or generated.get(lang) or {}
+        sc = scripts_in[lang] if scripts_in and lang in scripts_in else None
         merged = old | sc.model_dump(exclude={"questions"}) if sc else dict(old)
         texts = {k: v for k, v in (old.get("questions", {}) | (sc.questions if sc else {})).items() if k in ids}
         if any(not texts.get(q["id"], "").strip() for q in questions):
@@ -273,6 +318,8 @@ def edit_campaign(cid: str, body: CampaignEdit):
         if mode == "hybrid" and not (merged.get("doubts") or "").strip():
             raise HTTPException(400, f"Write the closing question (any other questions?) for {LANGUAGES.get(lang, lang)}")
         new[lang] = merged | {"questions": texts}
+    if target != langs_now:
+        changes["languages"] = target
     if new != c["scripts"]:
         changes["scripts"] = new
     if mode != c["mode"]:
@@ -281,9 +328,80 @@ def edit_campaign(cid: str, body: CampaignEdit):
         changes["handling"] = handling(provider, mode, voice or provider)
     if mode == "hybrid" and not c["simulated"] and ("scripts" in changes or mode != c["mode"]):
         changes["audio_ready"] = False  # resuming synthesises only what is missing
+    dropped = 0
     if changes:
         store.update_campaign(cid, changes)
-    return {"updated": sorted(changes)}
+        if remap:
+            dropped = _remap_answers(cid, *remap)
+    return {"updated": sorted(changes), "dropped_answers": dropped, "warnings": warnings}
+
+
+# ---------- contacts of an existing campaign ----------
+
+class ContactEdit(BaseModel):
+    id: str
+    name: str | None = Field(None, min_length=1, max_length=60)
+    language: str | None = None
+    segment: str | None = Field(None, min_length=1, max_length=40)
+
+
+class ContactsChange(BaseModel):
+    add_csv: str = Field("", max_length=1_000_000)   # name, phone[, language][, segment] rows, like the builder's list
+    remove: list[str] = Field(default_factory=list, max_length=MAX_CONTACTS)
+    update: list[ContactEdit] = Field(default_factory=list, max_length=MAX_CONTACTS)
+
+
+def apply_contacts(cid: str, change: ContactsChange) -> dict:
+    """Add, update and remove the contacts of a campaign that is not calling. Removing a contact also erases their call log,
+    history and recordings. A finished campaign that gets new contacts becomes paused so it can be resumed."""
+    c = _get(cid)
+    if c["status"] in ("running", "preparing"):
+        raise HTTPException(409, "Pause the campaign before changing its contacts")
+    langs = c["languages"]
+    existing = store.recipients(cid)
+    done = {"added": 0, "updated": 0, "removed": 0, "skipped": []}
+    for u in change.update:
+        if u.language is not None and u.language not in langs:
+            raise HTTPException(400, f"{LANGUAGES.get(u.language, u.language)} is not one of this campaign's languages")
+    if change.remove:
+        done["removed"] = store.remove_recipients(cid, change.remove)
+    known = {r["id"] for r in existing} - set(change.remove)
+    for u in change.update:
+        if u.id in known:
+            store.update_recipient(u.id, u.model_dump(exclude={"id"}, exclude_none=True))
+            done["updated"] += 1
+    if change.add_csv.strip():
+        rows, errors = parse_contacts(change.add_csv, langs)
+        have = {r["phone"] for r in existing if r["id"] not in change.remove}
+        fresh = []
+        for r in rows:
+            if r["phone"] in have:
+                errors.append({"line": 0, "error": "Already in this campaign"})
+            else:
+                have.add(r["phone"])
+                fresh.append(r)
+        room = MAX_CONTACTS - (len(existing) - done["removed"])
+        if len(fresh) > room:
+            errors.append({"line": 0, "error": f"Only {max(room, 0)} more fit in one campaign (limit {MAX_CONTACTS:,})"})
+            fresh = fresh[:max(room, 0)]
+        store.add_recipients([{
+            "id": f"{cid}-{secrets.token_hex(4)}", "campaign_id": cid, "name": r["name"], "phone": r["phone"], "language": r["language"],
+            "segment": r["segment"], "outcome": "pending", "channel": None, "attempts": 0, "retrying": 0, "in_flight": 0,
+            "call_sid": None, "last_attempt_at": None, "recording_url": None, "pickup": None} for r in fresh])
+        done["added"] = len(fresh)
+        done["skipped"] = errors[:20]
+        if fresh and c["status"] == "completed":
+            store.set_status(cid, "paused")
+        if fresh and c["mode"] == "hybrid":
+            store.update_campaign(cid, {"audio_ready": False})  # their names need audio: resuming makes only what is missing
+    now = store.recipients(cid)
+    store.update_campaign(cid, {"segments": list(dict.fromkeys(r["segment"] for r in now))})
+    return done | {"total": len(now)}
+
+
+@app.post("/api/campaigns/{cid}/contacts")
+def change_contacts(cid: str, body: ContactsChange):
+    return apply_contacts(cid, body)
 
 
 # ---------- campaign agent ----------
@@ -299,9 +417,11 @@ def _agent_state(cid: str) -> dict:
         "questions": [{"id": q["id"], "label": q["label"], "options": q["options"], "only_if_confirmed": q["only_if_confirmed"],
                        "answered": q["answered"], "results": q["results"]} for q in d["questions"]],
         "results": {"recipients": d["totals"]["recipients"], "calls_placed": d["totals"]["calls_placed"],
-                    "answered": d["totals"]["answered"], "confirm_rate": d["totals"]["confirm_rate"], "counts": d["totals"]["counts"],
-                    "cost_inr": d["totals"]["cost_inr"]},
+                    "answered": d["totals"]["answered"], "confirm_rate": d["totals"]["confirm_rate"], "counts": d["totals"]["counts"]},
         "note": d["note"], "ivr_audio_ready": bool(c["audio_ready"]),
+        # Counts only: names and phone numbers never go to the model.
+        "contacts": {"total": len(d["recipients"]), "by_language": {g["key"]: g["total"] for g in d["by_language"]},
+                     "by_segment": {g["key"]: g["total"] for g in d["by_segment"]}, "by_outcome": d["totals"]["counts"]},
     }
 
 
@@ -346,21 +466,110 @@ def campaign_agent(body: AgentReq):
     if "pause" in actions and c["status"] in ("running", "preparing"):
         store.set_status(cid, "paused")
         applied.append("paused")
+    if edits.get("contact_ops"):
+        add_csv, rm, upd = [], [], []
+        all_recs = store.recipients(cid)
+        for op in edits["contact_ops"]:
+            if op["op"] == "add":
+                add_csv.append(op["csv"])
+                continue
+            w = op["where"]
+            hit = [r for r in all_recs if (not w.get("language") or r["language"] == w["language"])
+                   and (not w.get("segment") or r["segment"].lower() == w["segment"].lower())
+                   and (not w.get("outcome") or r["outcome"] == w["outcome"])
+                   and (not w.get("name_contains") or w["name_contains"].lower() in r["name"].lower())]
+            if op["op"] == "remove":
+                rm += [r["id"] for r in hit]
+            else:
+                upd += [ContactEdit(id=r["id"], language=op.get("language"), segment=op.get("segment")) for r in hit]
+        try:
+            done = apply_contacts(cid, ContactsChange(add_csv="\n".join(add_csv), remove=list(dict.fromkeys(rm)), update=upd))
+            bits = [f"{done[k]} {k}" for k in ("added", "updated", "removed") if done[k]]
+            if bits:
+                applied.append("contacts")
+                reply += "\n\nContacts: " + ", ".join(bits) + f" ({done['total']} in the campaign)."
+            if done["skipped"]:
+                reply += f" {len(done['skipped'])} row(s) were skipped: {done['skipped'][0]['error']}."
+        except HTTPException as exc:
+            errors.append(str(exc.detail))
     if edits:
         cur = c["scripts"]
         scripts = None
-        if "scripts" in edits:
+        qfields = ("id", "label", "options", "only_if_confirmed")
+        questions, spoken = None, {}
+        if edits.get("question_ops"):
+            cur_q = [{k: q.get(k) for k in qfields} for q in c["questions"]]
+            old_by_id = {q["id"]: q for q in cur_q}
+            touched: dict[str, dict] = {}   # question id -> the agent's own spoken wording (may be empty)
+            for op in edits["question_ops"]:
+                if op["op"] == "remove":
+                    if op.get("id") in {q["id"] for q in cur_q}:
+                        cur_q = [q for q in cur_q if q["id"] != op["id"]]
+                    else:
+                        errors.append(f"There is no question {op.get('id') or ''} to remove.")
+                elif op["op"] == "update":
+                    q = next((q for q in cur_q if q["id"] == op.get("id")), None)
+                    if not q:
+                        errors.append(f"There is no question {op.get('id') or ''} to change.")
+                        continue
+                    q.update({k: op[k] for k in ("label", "options", "only_if_confirmed") if k in op})
+                    touched[q["id"]] = op.get("spoken", {})
+                else:
+                    used = {q["id"] for q in cur_q}
+                    qid = next(f"q{i}" for i in range(1, 1000) if f"q{i}" not in used)
+                    if len(cur_q) >= llm.MAX_QUESTIONS:
+                        errors.append(f"A campaign can have at most {llm.MAX_QUESTIONS} follow-up questions.")
+                        break
+                    cur_q.append({"id": qid, "label": op["label"], "options": op["options"],
+                                  "only_if_confirmed": op.get("only_if_confirmed", True)})
+                    touched[qid] = op.get("spoken", {})
+            try:
+                questions = [Question(**q) for q in cur_q]
+            except Exception:
+                errors.append("A question needs a label and 2 to 6 options.")
+                questions = None
+            if questions is not None:
+                explicit = {l: set((p.get("questions") or {})) for l, p in (edits.get("scripts") or {}).items()}
+                for q in cur_q:
+                    old = old_by_id.get(q["id"])
+                    if q["id"] not in touched and old == q:
+                        continue
+                    if old == q and not any(touched.get(q["id"], {}).values()):
+                        continue
+                    # New or changed question: its spoken wording must follow in every language. Use what the agent
+                    # wrote, else translate it (one call), else the English wording.
+                    want = [l for l in c["scripts"] if l not in touched.get(q["id"], {}) and q["id"] not in explicit.get(l, set())]
+                    texts: dict = {}
+                    if want:
+                        try:
+                            texts = translate_question(TranslateReq(label=q["label"], options=q["options"], languages=list(c["scripts"])))["texts"]
+                        except Exception:
+                            texts = {}
+                    for l in c["scripts"]:
+                        said = touched.get(q["id"], {}).get(l)
+                        if said:
+                            spoken.setdefault(l, {})[q["id"]] = said
+                        elif q["id"] not in explicit.get(l, set()):
+                            spoken.setdefault(l, {})[q["id"]] = texts.get(l) or (
+                                f"{q['label']}. Press " + ", ".join(f"{i} for {o}" for i, o in enumerate(q["options"], 1)) + ".")
+        if "scripts" in edits or spoken or questions is not None:
             scripts = {}
             for l, sc in cur.items():
-                part = edits["scripts"].get(l, {})
-                texts = (sc.get("questions") or {}) | part.get("questions", {})
+                part = (edits.get("scripts") or {}).get(l, {})
+                texts = (sc.get("questions") or {}) | part.get("questions", {}) | spoken.get(l, {})
                 scripts[l] = {k: v for k, v in sc.items() if k != "questions"} | {k: v for k, v in part.items() if k != "questions"} | {"questions": texts}
         try:
             payload = CampaignEdit(
+                questions=questions,
                 name=edits.get("name"), provider=edits.get("provider"), mode=edits.get("mode"),
                 system_prompt=edits.get("system_prompt"), retry=edits.get("retry"), event=edits.get("event"),
+                languages=edits.get("languages"),
                 scripts={l: Script(**sc) for l, sc in scripts.items()} if scripts else None)
-            applied += edit_campaign(cid, payload)["updated"]
+            done = edit_campaign(cid, payload)
+            applied += done["updated"]
+            reply += "".join(f"\n\n{w}" for w in done.get("warnings", []))
+            if done.get("dropped_answers"):
+                reply += f"\n\n{done['dropped_answers']} saved answer(s) pointed at options that no longer exist and were cleared."
         except HTTPException as exc:
             errors.append(str(exc.detail))
         except Exception as exc:

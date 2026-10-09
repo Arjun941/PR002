@@ -147,7 +147,6 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
         <dl className="facts">
           <div><dt>Recipients</dt><dd>{fmt.int(n)}</dd></div>
           <div><dt>Made up of</dt><dd>{fmt.int(s.counts.voicemail)} voicemail, {fmt.int(s.counts.no_answer)} no answer</dd></div>
-          <div><dt>Estimated cost</dt><dd>{fmt.inr2(d.retry_estimate_inr)}</dd></div>
         </dl>
       </>
     ),
@@ -277,7 +276,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
         <Stat label="Calls placed" value={s.calls_placed} kind="int" animate={false} sub={`to ${fmt.int(s.contacted)} of ${fmt.int(s.recipients)} recipients`} />
         <Stat label="Answer rate" value={s.answer_rate} kind="pct" animate={false} sub={`${fmt.int(s.answered)} calls answered`} />
         <Stat label="Confirmed" value={s.counts.confirmed} kind="int" animate={false} sub={`${fmt.pct(s.confirm_rate)} of answered calls`} />
-        <Stat label="Estimated cost" value={s.cost_inr} kind="inr" animate={false} sub={`${fmt.inr2(s.cost_inr / Math.max(s.calls_placed, 1))} per call`} />
+        <Stat label="Waiting to be called" value={s.counts.pending} kind="int" animate={false} sub={`of ${fmt.int(s.recipients)} recipients`} />
       </section>
 
       <section className="grid-2 even">

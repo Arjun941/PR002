@@ -10,7 +10,7 @@ export function QuestionsEditor({ questions, onChange, escalation, payment }: {
   const setOption = (i: number, k: number, v: string) => set(i, { options: questions[i].options.map((o, j) => j === k ? v : o) });
   const add = () => {
     const used = new Set(questions.map(q => q.id));
-    const id = [...Array(9)].map((_, n) => `q${n + 1}`).find(x => !used.has(x))!;
+    const id = [...Array(used.size + 1)].map((_, n) => `q${n + 1}`).find(x => !used.has(x))!;
     onChange([...questions, { id, label: "", options: ["", ""], only_if_confirmed: true }]);
   };
   const main = payment ? ["Will pay by then", "Already paid", "Needs more time"] : ["Confirm", "Can't make it", "Reschedule"];

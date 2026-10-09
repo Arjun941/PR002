@@ -215,6 +215,37 @@ class SqliteStore:
                 db.execute("UPDATE campaigns SET status = 'running' WHERE id = ? AND status = 'completed'", (cid,))
         return n
 
+    # ---------- contacts of an existing campaign ----------
+
+    def add_recipients(self, recs: list[dict]) -> None:
+        if not recs:
+            return
+        cols = list(recs[0])
+        with self._tx() as db:
+            db.executemany(f"INSERT INTO recipients ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                           [[r[k] for k in cols] for r in recs])
+
+    def update_recipient(self, rid: str, fields: dict) -> None:
+        """name, language and segment only (the phone number is the identity: remove and add instead)."""
+        fields = {k: v for k, v in fields.items() if k in ("name", "language", "segment")}
+        if fields:
+            with self._tx() as db:
+                db.execute(f"UPDATE recipients SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?", [*fields.values(), rid])
+
+    def remove_recipients(self, cid: str, ids: list[str]) -> int:
+        """Deletes these contacts of the campaign with their call log, history and recordings (a person asked to be
+        removed must not leave audio behind). Contacts on a call right now are skipped. Returns how many went."""
+        n = 0
+        with self._tx() as db:
+            for rid in ids:
+                if not db.execute("SELECT 1 FROM recipients WHERE id = ? AND campaign_id = ? AND in_flight = 0", (rid, cid)).fetchone():
+                    continue
+                db.execute("DELETE FROM calls WHERE recipient_id = ?", (rid,))
+                db.execute("DELETE FROM recording_audio WHERE recipient_id = ? OR call_id = ?", (rid, rid))
+                db.execute("DELETE FROM call_history WHERE recipient_id = ?", (rid,))
+                n += db.execute("DELETE FROM recipients WHERE id = ?", (rid,)).rowcount
+        return n
+
     # ---------- voice preparation ----------
 
     def pause_preparing(self, cid: str, note: str) -> None:
