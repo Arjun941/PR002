@@ -27,6 +27,7 @@ const TITLE_HINT: Record<string, string> = {
 };
 const SAMPLE = "name,phone,language,segment\nAsha Kulkarni,8943198705,ml,Class 5\nRavi Menon,+91 8301920200,en,Class 6\n";
 
+const OTHER = "__other__";
 const EMPTY_EVENT: EventDetails = { org: "", kind: "seminar", title: "", date: "", time: "", venue: "", details: "" };
 
 export default function NewCampaignPage() {
@@ -116,7 +117,7 @@ export default function NewCampaignPage() {
   const unusable = !prov || !prov.caps.live.ready || (hybrid && !voiceReady);
   const estimate = est?.key === estKey ? est.e : null;
   const ok = [
-    !!ev.title.trim() && langs.length > 0,
+    !!ev.title.trim() && !!ev.kind.trim() && langs.length > 0,
     !!contacts && contacts.count > 0 && contacts.error_count === 0,
     !!d && !!name.trim() && langs.every(l => d.scripts[l] && SCRIPT_FIELDS.every(f => d.scripts[l][f].trim())) &&
       questions.every(q => q.label.trim() && q.options.every(o => o.trim()) &&
@@ -243,13 +244,19 @@ export default function NewCampaignPage() {
               <input id="org" className="input" placeholder="Greenfield School" value={ev.org} onChange={e => setE({ org: e.target.value })} />
             </div>
             <div className="field"><label htmlFor="kind">Type</label>
-              <select id="kind" className="select" value={ev.kind} onChange={e => setE({ kind: e.target.value as EventDetails["kind"] })}>
+              <select id="kind" className="select" value={opts.kinds.some(k => k.value === ev.kind) ? ev.kind : OTHER}
+                onChange={e => setE({ kind: e.target.value === OTHER ? "" : e.target.value })}>
                 {opts.kinds.map(k => <option key={k.value} value={k.value}>{k.label}</option>)}
+                <option value={OTHER}>Other (type your own)…</option>
               </select>
+              {!opts.kinds.some(k => k.value === ev.kind) && (
+                <input className="input" style={{ marginTop: 8 }} maxLength={40} aria-label="Custom campaign type"
+                  placeholder="e.g. Workshop reminder" value={ev.kind} onChange={e => setE({ kind: e.target.value })} />
+              )}
             </div>
           </div>
           <div className="field"><label htmlFor="title">What is it about?</label>
-            <input id="title" className="input" placeholder={`e.g. ${TITLE_HINT[ev.kind]}`} value={ev.title} onChange={e => setE({ title: e.target.value })} />
+            <input id="title" className="input" placeholder={`e.g. ${TITLE_HINT[ev.kind] ?? "your event or notice"}`} value={ev.title} onChange={e => setE({ title: e.target.value })} />
           </div>
           <div className="row-3">
             <div className="field"><label htmlFor="date">{ev.kind === "payment" ? "Due date" : "Date"}</label>
@@ -493,7 +500,7 @@ export default function NewCampaignPage() {
               </div>
             </div>
             <div className="card">
-              <div className="card-head"><h2>{name}</h2><span className="chip">{KIND[ev.kind]}</span></div>
+              <div className="card-head"><h2>{name}</h2><span className="chip">{KIND[ev.kind] || ev.kind}</span></div>
               <dl className="facts" style={{ margin: 16 }}>
                 <div><dt>Recipients</dt><dd>{fmt.int(contacts.count)}</dd></div>
                 <div><dt>Languages</dt><dd>{langs.map(langName).join(", ")}</dd></div>

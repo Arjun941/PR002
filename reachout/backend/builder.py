@@ -12,12 +12,12 @@ import os
 import re
 import secrets
 from collections import Counter
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field, StringConstraints
 
-from . import audio, callctx, catalog, costs, llm, store, webphone
+from . import audio, callctx, catalog, costs, llm, recstore, store, webphone
 from .store import LANGUAGES, now_iso
 
 router = APIRouter(prefix="/api")
@@ -26,10 +26,29 @@ DEMO = os.getenv("DEMO", "0") == "1"
 KINDS = {"seminar": "Seminar invitation", "clinic": "Clinic reminder", "school": "School notice",
          "payment": "Payment reminder"}
 MAX_CONTACTS = 5000
-Kind = Literal["seminar", "clinic", "school", "payment"]
 Provider = Literal["elevenlabs", "gemini"]
 Mode = Literal["live", "hybrid"]
 MAX_PROMPT = 6000
+
+
+def normalise_kind(v: str) -> str:
+    """The four presets keep their special handling (payment asks for an amount, and so on). Any other
+    label is a custom type: stored and shown as typed, handled as a general notice."""
+    v = re.sub(r"\s+", " ", v).strip()
+    if not v or any(ord(ch) < 32 for ch in v):
+        raise ValueError("Give the campaign a type")
+    return v.lower() if v.lower() in KINDS else v
+
+
+# A preset key ("seminar", ...) or a custom label of up to 40 characters.
+Kind = Annotated[str, StringConstraints(max_length=40), AfterValidator(normalise_kind)]
+
+
+
+def kind_options() -> list[dict]:
+    """Presets first, then every custom type used by an earlier campaign, so they can be picked again."""
+    used = sorted({c["kind"] for c in store.campaigns() if c["kind"] not in KINDS}, key=str.lower)
+    return [{"value": k, "label": l} for k, l in KINDS.items()] + [{"value": k, "label": k} for k in used]
 
 
 class Event(BaseModel):
@@ -177,7 +196,7 @@ def parse_contacts(text: str, langs: list[str]) -> tuple[list[dict], list[dict]]
 def options():
     return {
         "languages": [{"code": c, "name": n} for c, n in LANGUAGES.items()],
-        "kinds": [{"value": k, "label": l} for k, l in KINDS.items()],
+        "kinds": kind_options(),
         "providers": [{"key": k, "label": catalog.label(k), "region": p["region"], "sends": p["sends"],
                        "caps": {cap: {"supported": catalog.supports(k, cap), "ready": catalog.ready(k, cap),
                                       "missing": catalog.missing(k, cap)} for cap in p["caps"]}}
@@ -225,12 +244,12 @@ def handling(provider: str, mode: str, voice: str = "") -> dict:
     if mode == "live":
         return {"audio": {"provider": p["label"], "note": "The whole call is a live conversation. " + p["sends"]},
                 "text": {"provider": p["label"], "note": "Speech is processed live for the whole call"},
-                "recordings": {"provider": "Not recorded", "note": "No call audio is kept"}}
+                "recordings": recstore.handling({})}
     v = catalog.PROVIDERS.get(voice or provider, p)
     return {"audio": {"provider": v["label"], "note": "IVR phrases and names are synthesised once. " + v["sends"]},
             "text": {"provider": p["label"],
                      "note": "Only callers who ask a question at the end; their voice goes to " + p["region"]},
-            "recordings": {"provider": "Not recorded", "note": "No call audio is kept"}}
+            "recordings": recstore.handling({})}
 
 
 class PreviewReq(BaseModel):

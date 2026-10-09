@@ -29,6 +29,7 @@ export function useCrumbs(crumbs: Crumb[]) {
 const NAV: { href: string; label: string; icon: IconName }[] = [
   { href: "/overview", label: "Overview", icon: "grid" },
   { href: "/campaigns", label: "Campaigns", icon: "phone" },
+  { href: "/history", label: "History", icon: "clock" },
   { href: "/providers", label: "Providers", icon: "cpu" },
 ];
 const SOON: { label: string; icon: IconName }[] = [

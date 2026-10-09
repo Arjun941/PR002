@@ -15,13 +15,11 @@ import os
 import secrets
 import time
 import wave
-from urllib.parse import urlparse
 
-import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from . import store
+from . import recstore, store
 
 SAMPLE_RATE = 8000
 
@@ -111,6 +109,12 @@ async def play(rid: str, request: Request):
     url = r["recording_url"]
     if url == "demo":
         return Response(_demo_audio(), media_type="audio/wav", headers={"Cache-Control": "no-store"})
+    key = recstore.key_for(r)  # our own recording of the recipient's latest call, kept in the database
+    if key:
+        saved = recstore.load(key)
+        if not saved:  # we recorded it ourselves, so there is no other copy to fall back to
+            raise HTTPException(404, "The recording could not be read. If RECORDINGS_KEY changed, restore the old key.")
+        return Response(saved[0], media_type=saved[1], headers={"Cache-Control": "no-store"})
     host = urlparse(url).hostname or ""
     if urlparse(url).scheme != "https":
         raise HTTPException(502, "Recording URL is not https")

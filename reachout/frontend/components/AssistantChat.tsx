@@ -3,7 +3,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { api, post } from "@/lib/api";
 import { KIND } from "@/lib/format";
-import { PREFILL_KEY, type AssistantReply, type Draft, type Prefill, type ProviderKey } from "@/lib/types";
+import { PREFILL_KEY, type AssistantReply, type ChatGPTStatus, type Draft, type Prefill, type ProviderKey } from "@/lib/types";
 import { useData } from "@/components/hooks";
 import { Icon } from "@/components/Icon";
 import { useShell } from "@/components/Shell";
@@ -33,6 +33,8 @@ export function AssistantChat() {
   const log = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const { data: voiceOpts } = useData(() => api<{ server: ServerSTT[] }>("/assistant/voice"), []);
+  const { data: gpt, retry: reloadGpt } = useData(() => api<ChatGPTStatus>("/auth/chatgpt"), []);
+  const [linking, setLinking] = useState(false);
   const [speechLang, setSpeechLang] = useSpeechLang();
   const [voiceNote, setVoiceNote] = useState("");
   const voiced = useRef(false);
@@ -50,6 +52,17 @@ export function AssistantChat() {
     onError: msg => toast(msg, "error"),
   });
   const listening = voice.state === "listening";
+
+  // Back from the ChatGPT sign-in: say how it went once, then clean the address bar.
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    const result = q.get("chatgpt");
+    if (!result) return;
+    if (result === "connected") { toast("ChatGPT connected"); setOpen(true); }
+    else toast(q.get("reason") || "ChatGPT sign-in failed", "error");
+    window.history.replaceState(null, "", window.location.pathname);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => { log.current?.scrollTo({ top: log.current.scrollHeight }); }, [turns, busy, drafting, open]);
   useEffect(() => {
@@ -104,6 +117,21 @@ export function AssistantChat() {
     router.push("/campaigns/new");
   };
 
+  const connectGpt = async () => {
+    setLinking(true);
+    try {
+      const r = await post<{ url: string }>("/auth/chatgpt/start", { next: "/overview" });
+      window.location.href = r.url;
+    } catch (e) { toast((e as Error).message, "error"); setLinking(false); }
+  };
+
+  const disconnectGpt = async () => {
+    setLinking(true);
+    try { await post("/auth/chatgpt/disconnect"); reloadGpt(); }
+    catch (e) { toast((e as Error).message, "error"); }
+    finally { setLinking(false); }
+  };
+
   const reset = () => { setTurns([GREETING]); setLast(null); setScripts(null); setText(""); input.current?.focus(); };
 
   return (
@@ -118,6 +146,23 @@ export function AssistantChat() {
               <button className="btn sm ghost" aria-label="Minimise assistant" onClick={() => setOpen(false)}><Icon name="minus" size={14} /></button>
             </div>
           </div>
+          {gpt && (
+            <div className="chat-conn">
+              {gpt.connected ? (
+                <>
+                  <span>Using the ChatGPT plan of <b>{gpt.email ?? "the connected account"}</b>. If it runs out, our own model takes over.</span>
+                  <button className="btn sm" type="button" disabled={linking} onClick={() => void disconnectGpt()}>Disconnect</button>
+                </>
+              ) : (
+                <>
+                  <span>Connect ChatGPT so the assistant and script drafts run on your plan (Plus or Pro). Opens OpenAI to sign in; use this dashboard on the machine that runs the server.</span>
+                  <button className="btn primary sm" type="button" disabled={linking} onClick={() => void connectGpt()}>
+                    {linking && <span className="spinner" />}Connect ChatGPT
+                  </button>
+                </>
+              )}
+            </div>
+          )}
           {voiceNote && <div className="voice-note"><Icon name="mic" size={14} />{voiceNote}</div>}
           <div className="chat-log" ref={log} aria-live="polite">
             {turns.map((t, i) => (
@@ -132,7 +177,8 @@ export function AssistantChat() {
           {ready && !drafting && (
             <div className="chat-ready">
               <dl className="facts">
-                <div><dt>Type</dt><dd>{KIND[ready.event.kind] || ready.event.kind}</dd></div>
+                <div><dt>Type</dt><dd>{KIND[ready.event.kind] || ready.event.kind}
+                  {ready.suggested?.includes("kind") && <em className="sugg">AI chose</em>}</dd></div>
                 <div><dt>About</dt><dd>{ready.event.title}{ready.event.org && ` · ${ready.event.org}`}
                   {ready.suggested?.includes("title") && <em className="sugg">AI wording</em>}</dd></div>
                 <div><dt>When</dt><dd>{[ready.event.date, ready.event.time].filter(Boolean).join(" at ")}</dd></div>

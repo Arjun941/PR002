@@ -485,3 +485,18 @@ kbd {
 .prov-check { margin-top: 8px; font-size: 13px; }
 .prov-check.ok { color: var(--accent); }
 .prov-check.bad { color: var(--c-declined); }
+
+/* call history */
+.history-detail { margin-bottom: 16px; }
+.history-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; padding: 0 16px; }
+.history-block { padding: 14px 16px; border-top: 1px solid var(--line); margin-top: 14px; }
+.history-block h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; font-size: 13px; font-weight: 500; color: var(--muted); }
+.history-block summary { cursor: pointer; }
+.history-player { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.history-player audio { flex: 1 1 260px; max-width: 100%; }
+.qa-table td:first-child { color: var(--muted); width: 50%; }
+.transcript { max-height: 360px; padding: 12px 0 0; }
+tr.clickable.on td { background: var(--accent-soft); }
+.recipient-detail td { background: var(--panel-2); white-space: normal; }
+.recipient-detail .facts { margin: 8px 0 0; max-width: 720px; }
+.recipient-detail .facts dd { text-align: left; }

@@ -32,7 +32,7 @@ CAP_LABELS = {"draft": "Writes scripts and the agent prompt", "voice": "Pre-synt
 
 
 def label(key: str) -> str:
-    return PROVIDERS[key]["label"] if key in PROVIDERS else key
+    return PROVIDERS[key]["label"] if key in PROVIDERS else "ChatGPT (connected plan)" if key == "chatgpt" else key
 
 
 def supports(key: str, cap: str) -> bool:

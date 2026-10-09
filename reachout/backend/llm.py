@@ -14,7 +14,7 @@ import re
 
 import httpx
 
-from . import callctx, catalog
+from . import callctx, catalog, chatgpt
 from .store import LANGUAGES
 
 log = logging.getLogger("reachout.llm")
@@ -135,11 +135,23 @@ def _gemini(messages: list[dict]) -> dict:
     return _parse(resp.text or "")
 
 
+def _chatgpt(messages: list[dict]) -> dict:
+    return _parse(chatgpt.complete(messages))
+
+
 def run_json(messages: list[dict], requested: str) -> tuple[dict, str, list[str]]:
-    """One model call returning JSON: (reply, provider that wrote it, warnings). The requested provider writes it
+    """One model call returning JSON: (reply, provider that wrote it, warnings). A connected ChatGPT plan writes it
+    first (it costs us nothing); if it is not connected, out of allowance or fails, the requested provider writes it
     if it can; otherwise the first configured one that can; with none usable the reply is {} and the provider is
     "template". Each step leaves a warning."""
     warnings: list[str] = []
+    if chatgpt.connected():
+        try:
+            return _chatgpt(messages), "chatgpt", warnings
+        except Exception as exc:  # plan limit, ineligible account, network: fall back to our own models
+            reason = exc.reason if isinstance(exc, chatgpt.ChatGPTError) else type(exc).__name__
+            log.warning("call via chatgpt failed: %s", type(exc).__name__)
+            warnings.append(f"ChatGPT failed ({reason}).")
     run = {"gemini": _gemini}
     first = catalog.drafter(requested)
     if first is None:

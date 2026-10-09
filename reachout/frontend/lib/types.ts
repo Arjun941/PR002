@@ -19,6 +19,20 @@ export interface Recipient {
   id: string; name: string; phone: string; language: string; segment: string;
   outcome: Outcome; channel: "keypad" | "speech" | "agent" | null; attempts: number; retrying: boolean;
   has_recording: boolean; answers: Record<string, string>;
+  last_call?: LastCall | null;
+}
+export interface UnseenCall { call_id: string; campaign_id: string; recipient: string; at: string }
+export interface QA { question: string; answer: string }
+export interface LastCall { call_id: string; qa: QA[]; summary: string; talk_seconds: number | null; ended_at: string; analysis: string }
+export interface CallRecord {
+  id: string; campaign_id: string | null; campaign_name: string | null; org: string; recipient_id: string | null;
+  recipient_name: string | null; phone: string | null; language: string | null; provider: string | null; mode: string | null;
+  rang_at: string; answered_at: string | null; ended_at: string; ring_seconds: number | null; talk_seconds: number | null;
+  outcome: Outcome | null; channel: string | null; attempt: number | null; answers: Record<string, string>;
+  recording: { saved: boolean; note: string; seconds: number };
+  analysis: { status: "pending" | "done" | "failed" | "off" | "none"; note?: string; by?: string };
+  final_heard: string | null; summary: string; has_recording: boolean; qa_count?: number;
+  qa?: QA[]; transcript?: { speaker: "agent" | "person"; text: string }[]; keys_pressed?: string[]; event_title?: string | null;
 }
 export interface RetryPolicy { max_attempts: number; gap_hours: number }
 export const SCRIPT_FIELDS = ["greeting", "message", "menu", "voicemail", "goodbye"] as const;
@@ -47,7 +61,7 @@ export interface Detail extends Summary {
 }
 
 // Campaign builder
-export type Kind = "seminar" | "clinic" | "school" | "payment";
+export type Kind = string; // a preset key (seminar, clinic, school, payment) or a custom label
 export type ProviderKey = "elevenlabs" | "gemini";
 export type Mode = "live" | "hybrid";
 export interface Cap { supported: boolean; ready: boolean; missing: string[] }
@@ -69,10 +83,11 @@ export interface BuilderOptions {
   providers: BuilderProvider[]; default_provider: ProviderKey;
   phones: number;
 }
+export interface ChatGPTStatus { connected: boolean; email: string | null; redirect_uri: string }
 export const PREFILL_KEY = "reachout.prefill";
 export interface AssistantReply {
   reply: string; ready: boolean; event: EventDetails | null; languages: string[]; language_names: string[];
-  missing: { key: string; label: string }[]; suggested: ("title" | "details")[]; provider: string; provider_key: string; warnings: string[];
+  missing: { key: string; label: string }[]; suggested: ("kind" | "title" | "details")[]; provider: string; provider_key: string; warnings: string[];
 }
 /** Handed from the assistant to the builder through sessionStorage. */
 export interface Prefill {

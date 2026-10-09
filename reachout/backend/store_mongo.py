@@ -56,6 +56,8 @@ class MongoStore:
             self.db = self.client.get_default_database(default="reachout")
         self.campaigns_c, self.recipients_c = self.db["campaigns"], self.db["recipients"]
         self.calls_c, self.access_c = self.db["calls"], self.db["access_log"]
+        self.audio_c = self.db["recording_audio"]  # one document per call, keyed by call id
+        self.history_c = self.db["call_history"]  # one document per call: timings, outcome, answers, transcript
 
     def init(self) -> None:
         self.client.admin.command("ping")  # fail at start-up, with a clear error, if MongoDB is unreachable
@@ -64,6 +66,10 @@ class MongoStore:
         self.recipients_c.create_index("call_sid")
         self.recipients_c.create_index("in_flight")
         self.calls_c.create_index("at")
+        self.audio_c.create_index("saved_at")  # also creates the recording_audio collection up front
+        self.audio_c.create_index("campaign_id")
+        self.history_c.create_index([("rang_at", DESCENDING)])
+        self.history_c.create_index("campaign_id")
 
     def _log(self, r: dict, outcome: str, at: str | None = None) -> None:
         self.calls_c.insert_one({"campaign_id": r["campaign_id"], "recipient_id": r["id"], "call_sid": r["call_sid"],
@@ -122,6 +128,9 @@ class MongoStore:
     def delete_campaign(self, cid: str) -> bool:
         """The campaign, its recipients and its call log. False if there was no such campaign."""
         self.calls_c.delete_many({"campaign_id": cid})
+        ids = [d["_id"] for d in self.recipients_c.find({"campaign_id": cid}, {"_id": 1})]
+        self.audio_c.delete_many({"$or": [{"campaign_id": cid}, {"_id": {"$in": ids}}]})  # the second: recordings from before calls had ids
+        self.history_c.delete_many({"campaign_id": cid})
         self.recipients_c.delete_many({"campaign_id": cid})
         return self.campaigns_c.delete_one({"_id": cid}).deleted_count > 0
 
@@ -220,7 +229,9 @@ class MongoStore:
         outcome = d["outcome"]
         if outcome == "pending":
             outcome = "voicemail" if completed else "no_answer"
-        set_ = {"in_flight": 0, "outcome": outcome, "recording_url": (recording if completed else None) or None}
+        set_ = {"in_flight": 0, "outcome": outcome}
+        if recording and completed:  # otherwise keep what we recorded ourselves during the call
+            set_["recording_url"] = recording
         if not d.get("call_sid") and sid:
             set_["call_sid"] = sid
         if not self.recipients_c.update_one({"_id": d["_id"], "in_flight": 1}, {"$set": set_}).modified_count:
@@ -247,6 +258,48 @@ class MongoStore:
             "outcome": r["outcome"], "channel": r["channel"], "attempts": r["attempts"], "retrying": 0,
             "last_attempt_at": r["last_attempt_at"], "recording_url": r["recording_url"], "answers": got}})
         self._log(r, outcome)
+
+    # ---------- saved recordings ----------
+
+    def set_recording_url(self, rid: str, url: str) -> None:
+        """Marks a recipient as having a recording, unless it already has one."""
+        self.recipients_c.update_one({"_id": rid, "recording_url": None}, {"$set": {"recording_url": url}})
+
+    def save_recording(self, key: str, data: bytes, content_type: str, encrypted: bool,
+                       campaign_id: str | None = None, recipient_id: str | None = None) -> None:
+        """One call's audio, keyed by its call id."""
+        self.audio_c.replace_one({"_id": key}, {"_id": key, "data": data, "content_type": content_type, "encrypted": encrypted,
+                                                "saved_at": now_iso(), "campaign_id": campaign_id, "recipient_id": recipient_id},
+                                 upsert=True)
+
+    def load_recording(self, key: str) -> tuple[bytes, str, bool] | None:
+        """(audio as stored, content type, encrypted) for a call id, or None."""
+        d = self.audio_c.find_one({"_id": key})
+        return (bytes(d["data"]), d["content_type"], bool(d["encrypted"])) if d else None
+
+    def recordings_present(self, keys: list[str]) -> set[str]:
+        return {d["_id"] for d in self.audio_c.find({"_id": {"$in": list(keys)}}, {"_id": 1})} if keys else set()
+
+    # ---------- call history ----------
+
+    def recipient_for_call(self, call_sid: str) -> dict | None:
+        """The recipient a call belongs to, in flight or not."""
+        d = self.recipients_c.find_one({"call_sid": call_sid})
+        return _recipient(d) if d else None
+
+    def save_call(self, call: dict) -> None:
+        """Creates or replaces one call's history record (`id` is the call id)."""
+        doc = {k: v for k, v in call.items() if k != "id"} | {"_id": call["id"], "rang_at": call.get("rang_at") or now_iso()}
+        self.history_c.replace_one({"_id": call["id"]}, doc, upsert=True)
+
+    def get_call(self, call_id: str) -> dict | None:
+        d = self.history_c.find_one({"_id": call_id})
+        return ({k: v for k, v in d.items() if k != "_id"} | {"id": d["_id"]}) if d else None
+
+    def list_calls(self, campaign_id: str | None = None, limit: int = 200) -> list[dict]:
+        """Newest first."""
+        cur = self.history_c.find({"campaign_id": campaign_id} if campaign_id else {}).sort("rang_at", DESCENDING).limit(limit)
+        return [{k: v for k, v in d.items() if k != "_id"} | {"id": d["_id"]} for d in cur]
 
     # ---------- access log ----------
 

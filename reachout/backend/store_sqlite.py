@@ -36,6 +36,15 @@ CREATE TABLE IF NOT EXISTS calls (
   call_sid TEXT, at TEXT NOT NULL, answered INTEGER NOT NULL, outcome TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS calls_at ON calls(at);
+CREATE TABLE IF NOT EXISTS recording_audio (
+  call_id TEXT PRIMARY KEY, data BLOB NOT NULL, content_type TEXT NOT NULL, encrypted INTEGER NOT NULL DEFAULT 0,
+  saved_at TEXT NOT NULL, campaign_id TEXT, recipient_id TEXT
+);
+CREATE TABLE IF NOT EXISTS call_history (
+  id TEXT PRIMARY KEY, campaign_id TEXT, recipient_id TEXT, rang_at TEXT NOT NULL, data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS call_history_rang ON call_history(rang_at);
+CREATE INDEX IF NOT EXISTS call_history_campaign ON call_history(campaign_id);
 CREATE TABLE IF NOT EXISTS access_log (
   id INTEGER PRIMARY KEY, at TEXT NOT NULL, action TEXT NOT NULL, target TEXT, client TEXT
 );
@@ -86,6 +95,13 @@ class SqliteStore:
     def init(self) -> None:
         with self._tx() as db:
             db.execute("PRAGMA journal_mode=WAL")
+            # Recordings were first kept one per recipient; they are now one per call (a retry no longer
+            # overwrites the earlier call's audio). Older rows keep their recipient id as the key.
+            old = {r["name"] for r in db.execute("PRAGMA table_info(recording_audio)")}
+            if "recipient_id" in old and "call_id" not in old:
+                db.execute("ALTER TABLE recording_audio RENAME COLUMN recipient_id TO call_id")
+                db.execute("ALTER TABLE recording_audio ADD COLUMN campaign_id TEXT")
+                db.execute("ALTER TABLE recording_audio ADD COLUMN recipient_id TEXT")
             db.executescript(SCHEMA)
             for table, cols in _ADDED.items():
                 have = {r["name"] for r in db.execute(f"PRAGMA table_info({table})")}
@@ -153,6 +169,9 @@ class SqliteStore:
         """The campaign, its recipients and its call log. False if there was no such campaign."""
         with self._tx() as db:
             db.execute("DELETE FROM calls WHERE campaign_id = ?", (cid,))
+            db.execute("DELETE FROM recording_audio WHERE campaign_id = ? OR call_id IN "
+                       "(SELECT id FROM recipients WHERE campaign_id = ?)", (cid, cid))  # the second: recordings from before calls had ids
+            db.execute("DELETE FROM call_history WHERE campaign_id = ?", (cid,))
             db.execute("DELETE FROM recipients WHERE campaign_id = ?", (cid,))
             return db.execute("DELETE FROM campaigns WHERE id = ?", (cid,)).rowcount > 0
 
@@ -263,7 +282,7 @@ class SqliteStore:
             if outcome == "pending":
                 outcome = "voicemail" if completed else "no_answer"
             db.execute("UPDATE recipients SET in_flight = 0, outcome = ?, call_sid = COALESCE(call_sid, ?), "
-                       "recording_url = ? WHERE id = ?", (outcome, sid, (recording if completed else None) or None, r["id"]))
+                       "recording_url = COALESCE(?, recording_url) WHERE id = ?", (outcome, sid, (recording if completed else None) or None, r["id"]))
             _log(db, dict(r) | {"call_sid": r["call_sid"] or sid}, outcome)
         return dict(r), outcome
 
@@ -290,6 +309,60 @@ class SqliteStore:
                        "recording_url = ?, answers = ? WHERE id = ?",
                        (r["outcome"], r["channel"], r["attempts"], r["last_attempt_at"], r["recording_url"], r["answers"], r["id"]))
             _log(db, r, outcome)
+
+    # ---------- saved recordings ----------
+
+    def set_recording_url(self, rid: str, url: str) -> None:
+        """Marks a recipient as having a recording, unless it already has one."""
+        with self._tx() as db:
+            db.execute("UPDATE recipients SET recording_url = ? WHERE id = ? AND recording_url IS NULL", (url, rid))
+
+    def save_recording(self, key: str, data: bytes, content_type: str, encrypted: bool,
+                       campaign_id: str | None = None, recipient_id: str | None = None) -> None:
+        """One call's audio, keyed by its call id."""
+        with self._tx() as db:
+            db.execute("INSERT OR REPLACE INTO recording_audio (call_id, data, content_type, encrypted, saved_at, campaign_id, "
+                       "recipient_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                       (key, data, content_type, int(encrypted), now_iso(), campaign_id, recipient_id))
+
+    def load_recording(self, key: str) -> tuple[bytes, str, bool] | None:
+        """(audio as stored, content type, encrypted) for a call id, or None."""
+        with self._tx() as db:
+            row = db.execute("SELECT data, content_type, encrypted FROM recording_audio WHERE call_id = ?", (key,)).fetchone()
+        return (bytes(row["data"]), row["content_type"], bool(row["encrypted"])) if row else None
+
+    def recordings_present(self, keys: list[str]) -> set[str]:
+        if not keys:
+            return set()
+        with self._tx() as db:
+            return {r[0] for r in db.execute(
+                f"SELECT call_id FROM recording_audio WHERE call_id IN ({', '.join('?' * len(keys))})", list(keys))}
+
+    # ---------- call history ----------
+
+    def recipient_for_call(self, call_sid: str) -> dict | None:
+        """The recipient a call belongs to, in flight or not."""
+        with self._tx() as db:
+            row = db.execute("SELECT * FROM recipients WHERE call_sid = ?", (call_sid,)).fetchone()
+        return dict(row) if row else None
+
+    def save_call(self, call: dict) -> None:
+        """Creates or replaces one call's history record (`id` is the call id)."""
+        with self._tx() as db:
+            db.execute("INSERT OR REPLACE INTO call_history (id, campaign_id, recipient_id, rang_at, data) VALUES (?, ?, ?, ?, ?)",
+                       (call["id"], call.get("campaign_id"), call.get("recipient_id"), call.get("rang_at") or now_iso(),
+                        json.dumps(call)))
+
+    def get_call(self, call_id: str) -> dict | None:
+        with self._tx() as db:
+            row = db.execute("SELECT data FROM call_history WHERE id = ?", (call_id,)).fetchone()
+        return json.loads(row["data"]) if row else None
+
+    def list_calls(self, campaign_id: str | None = None, limit: int = 200) -> list[dict]:
+        """Newest first."""
+        with self._tx() as db:
+            q = "SELECT data FROM call_history" + (" WHERE campaign_id = ?" if campaign_id else "") + " ORDER BY rang_at DESC LIMIT ?"
+            return [json.loads(r["data"]) for r in db.execute(q, ((campaign_id,) if campaign_id else ()) + (limit,))]
 
     # ---------- access log ----------
 

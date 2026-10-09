@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from . import catalog, llm
-from .builder import KINDS
+from .builder import KINDS, normalise_kind
 from .store import LANGUAGES
 
 log = logging.getLogger("reachout.assistant")
@@ -33,6 +33,8 @@ REQUIRED = {"seminar": _EVENT, "clinic": _EVENT, "school": _EVENT,
             "payment": ("kind", "org", "title", "date", "amount", "languages")}
 # A money amount: a currency marker next to a number, or a number of 3+ digits ("Term 2 fee" is not one).
 AMOUNT = re.compile(r"(₹|\brs\.?|\binr\b|rupee)\s*\d|\d[\d,]*(\.\d+)?\s*(₹|\brs\b|\binr\b|rupee)|\d[\d,]{2,}", re.I)
+# A custom type has no fixed shape (no venue or time to assume), so ask only for what every call needs.
+REQUIRED_CUSTOM = ("kind", "org", "title", "languages")
 LABELS = {"kind": "type of call", "org": "organisation", "title": "what it is about", "date": "date",
           "time": "time", "venue": "venue", "amount": "amount due", "languages": "languages"}
 
@@ -49,7 +51,9 @@ class ChatReq(BaseModel):
 def _system() -> str:
     return f"""You help staff of Indian schools, clinics and event organisers set up an automated phone-call campaign.
 Today is {date.today():%A, %d %B %Y}. Collect these from the conversation:
-- kind: seminar (event or seminar invitation), clinic (appointment reminder), school (notice to parents) or payment (payment reminder)
+- kind: seminar (event or seminar invitation), clinic (appointment reminder), school (notice to parents) or payment (payment reminder);
+  if none fits, coin a short label for it yourself (e.g. "workshop reminder", "membership renewal", "blood donation drive"),
+  at most 40 characters. Work the kind out from what the user describes; never ask them for it.
 - org: the organisation making the calls
 - title: what the call is about, as a clear, specific phrase a listener understands at once. Expand short or vague input
   into a fuller phrase from what the user said, e.g. "ptm" -> "the parent-teacher meeting for classes 1 to 5" (only if
@@ -62,6 +66,7 @@ Today is {date.today():%A, %d %B %Y}. Collect these from the conversation:
 
 Required before the campaign can be set up:
 - seminar, clinic, school: kind, org, title, date, time, venue and languages
+- any other kind: kind, org, title and languages (add date, time or venue only if the user gave them)
 - payment: kind, org, title, due date, the amount due (put it in the title) and languages
 
 Rules:
@@ -72,7 +77,7 @@ Rules:
 - When asking for languages, you may suggest the one the user is speaking, but only fill languages once they agree.
 - Facts come only from the user: never invent a date, time, venue, amount, fee, prize, speaker, contact number or any
   name. Leave unknown fields as "". Descriptive wording in title and details may go beyond their words; facts may not.
-- List in "suggested" the fields whose wording you wrote or expanded beyond what the user said (e.g. ["title", "details"]),
+- List in "suggested" the fields whose wording you wrote or expanded beyond what the user said, including "kind" when you chose or coined it (e.g. ["kind", "title", "details"]),
   so a person checks them.
 - Never assume a language: keep languages [] until the user names them.
 - Write dates and times the way a person would say them, e.g. "18 October", "10:30 am".
@@ -90,12 +95,15 @@ def _clean(raw: dict) -> tuple[dict, list[str], list[str]]:
     """Clamp the model's event to the schema and work out what is still missing (our rules, not the model's)."""
     ev = raw.get("event") if isinstance(raw.get("event"), dict) else {}
     out = {k: (str(ev.get(k) or "").strip()[:n]) for k, n in FIELD_MAX.items()}
-    out["kind"] = ev.get("kind") if ev.get("kind") in KINDS else ""
+    try:
+        out["kind"] = normalise_kind(str(ev.get("kind") or ""))[:40]  # a preset, or the user's own label
+    except ValueError:
+        out["kind"] = ""
     langs = [l for l in (raw.get("languages") if isinstance(raw.get("languages"), list) else []) if l in LANGUAGES]
     langs = list(dict.fromkeys(langs))
     have = {k: bool(v) for k, v in out.items()} | {"languages": bool(langs),
                                                    "amount": bool(AMOUNT.search(out["title"] + " " + out["details"]))}
-    missing = [f for f in REQUIRED.get(out["kind"], _EVENT) if not have[f]]
+    missing = [f for f in REQUIRED.get(out["kind"], REQUIRED_CUSTOM if out["kind"] else _EVENT) if not have[f]]
     return out, langs, missing
 
 
@@ -117,5 +125,6 @@ def chat(body: ChatReq):
             "ready": not missing,
             "missing": [{"key": f, "label": LABELS[f]} for f in missing],
             # Fields the model wrote beyond the user's words (descriptions, not facts): shown for review.
-            "suggested": [f for f in ("title", "details") if f in (raw.get("suggested") or []) and event[f]],
-            "provider": catalog.label(used), "provider_key": used, "warnings": warnings}
+            "suggested": [f for f in ("kind", "title", "details") if f in (raw.get("suggested") or []) and event[f]],
+            "provider": catalog.label(used), "provider_key": used if used in catalog.PROVIDERS else catalog.default(),  # ChatGPT only writes; the call provider stays ours
+            "warnings": warnings}

@@ -37,7 +37,21 @@ reminders). Telephony was Exotel; it was removed for now (2026-10-09, on request
 - Data lives in SQLite by default, or MongoDB when `MONGODB_URI` is set. `backend/store.py` is the only door:
   every query is a function there, implemented in `store_sqlite.py` and `store_mongo.py` (shared helpers in
   `dbcommon.py`). No raw SQL outside `store_sqlite.py`; a new data operation needs both backends. Copy an existing
-  SQLite file with `python -m backend.migrate_to_mongo`. Mongo phone numbers are plain text until Phase 6 encryption. Demo data is opt-in: `DEMO=1` seeds sample
+  SQLite file with `python -m backend.migrate_to_mongo`. Mongo phone numbers are plain text until Phase 6 encryption.
+  Sign in with ChatGPT (`backend/chatgpt.py`, strip in the assistant panel): when connected, `llm.run_json` tries the
+  connected plan first for drafts and the assistant, then the campaign's own model, then templates. It only writes text;
+  live calls stay on ElevenLabs/Gemini. One account per install. Refresh/`/models`/SSE details UNVERIFIED.
+  Call history (`/history` page, `backend/history.py`): `recwire.py` writes one record per call when it ends
+  (`store.save_call`, table/collection `call_history`: ring/answer/end times, outcome, keypad answers, recording status
+  with the reason when there is none); `callinsight.py` then sends the stereo recording (agent left, person right) to
+  Gemini once for summary, every question asked + answer (`qa`) and a transcript (`CALL_ANALYSIS=0` turns it off; audio
+  request format UNVERIFIED). Recordings are one per call (`recording_audio` keyed by call id; recipient
+  `recording_url` = `app:<call id>`). recwire also rewrites the phone's "incoming" message so the caller shown is the
+  event's org, not the recipient's own name.
+  Call recording: `backend/recwire.py` is an ASGI middleware that watches the `/ws/phone` socket from outside (no
+  edits to webphone/ivr/the agent engines), so live-agent and IVR calls are both recorded; `callrec.py` mixes the two
+  sides to one WAV, `recstore.py` saves it (optional Fernet `RECORDINGS_KEY`) in `recording_audio`, and it is deleted
+  with its campaign. Every call is recorded unless `RECORD_CALLS=campaign` (the builder hard-codes record=0 now). Demo data is opt-in: `DEMO=1` seeds sample
   campaigns into an empty DB and simulates calls for campaigns flagged `simulated` (`backend/demo.py`).
 - Phase 4: builder API in `backend/builder.py`, drafting in `backend/llm.py` (Gemini / built-in
   templates; non-English template output is flagged as an English placeholder), rates and estimate in

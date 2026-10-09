@@ -1,6 +1,7 @@
 "use client";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { use, useRef, useState } from "react";
+import { Fragment, use, useRef, useState } from "react";
 import { api, post } from "@/lib/api";
 import { ago, CHANNEL, fmt, KIND, ORDER, OUT } from "@/lib/format";
 import { SCRIPT_FIELDS, type Detail, type Recipient } from "@/lib/types";
@@ -110,6 +111,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
   const [f, setF] = useState({ q: "", outcome: "all", language: "all", segment: "all", limit: 50 });
   const [playing, setPlaying] = useState<Recipient | null>(null);
   const pinRef = useRef<HTMLInputElement>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
 
   useCrumbs([["Campaigns", "/campaigns"], [d?.name ?? "Campaign"]]);
   const refresh = async () => { try { setData(await api<Detail>(`/campaigns/${id}`)); } catch { /* keep last good view */ } };
@@ -290,7 +292,8 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                 <thead><tr><th>Name</th><th>Phone</th><th>Language</th><th>Segment</th><th>Outcome</th><th>Replied by</th><th className="num">Attempts</th>{d.questions.length > 0 && <th>Answers</th>}<th><span className="sr-only">Recording</span></th></tr></thead>
                 <tbody>
                   {shown.map(r => (
-                    <tr key={r.id}>
+                    <Fragment key={r.id}>
+                    <tr>
                       <td>{r.name}</td><td className="mono muted">{r.phone}</td><td>{r.language}</td>
                       <td className="muted">{r.segment}</td><td><OutcomePill r={r} /></td>
                       <td className="muted">{r.channel ? CHANNEL[r.channel] : "–"}</td><td className="num">{r.attempts}</td>
@@ -300,8 +303,24 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                         <button className="btn sm ghost" onClick={() => void play(r)} aria-label={`Play recording for ${r.name}`}>
                           <Icon name="play" size={12} />Play
                         </button>
+                      )}{r.last_call && (
+                        <button className="btn sm ghost" aria-expanded={expanded === r.id} onClick={() => setExpanded(x => x === r.id ? null : r.id)}>
+                          {expanded === r.id ? "Hide" : `Details${r.last_call.qa.length ? ` (${r.last_call.qa.length})` : ""}`}
+                        </button>
                       )}</td>
                     </tr>
+                    {expanded === r.id && r.last_call && (
+                      <tr className="recipient-detail">
+                        <td colSpan={8 + (d.questions.length > 0 ? 1 : 0)}>
+                          {r.last_call.summary && <p>{r.last_call.summary}</p>}
+                          {r.last_call.qa.length ? (
+                            <dl className="facts">{r.last_call.qa.map((q, i) => <div key={i}><dt>{q.question}</dt><dd>{q.answer || "No answer"}</dd></div>)}</dl>
+                          ) : <p className="muted">{r.last_call.analysis === "pending" ? "Working out what was said…" : "No questions and answers kept for this call."}</p>}
+                          <p style={{ marginTop: 8 }}><Link href={`/history?call=${encodeURIComponent(r.last_call.call_id)}`}>Full call details in History</Link></p>
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                   ))}
                 </tbody>
               </table>

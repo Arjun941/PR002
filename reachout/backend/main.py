@@ -18,11 +18,13 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from . import assistant, audio, demo, dialer, store, stt
-from . import catalog
+from . import catalog, chatgpt, recstore
 from .builder import DEMO, MAX_PROMPT, Retry, Script, handling, router as builder_router
 from .costs import RETRY_ESTIMATE_PER_CALL, recipient_cost
 from .providers import router as providers_router
+from .history import latest_by_recipient, router as history_router
 from .recordings import router as recordings_router
+from .recwire import CallRecordingMiddleware
 from .store import ANSWERED, LANGUAGES, NON_RESPONDER, OUTCOMES
 from .webphone import router as webphone_router
 
@@ -119,11 +121,14 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Reachout", lifespan=lifespan)
+app.add_middleware(CallRecordingMiddleware)  # records web-phone calls (recwire.py); touches nothing else
 app.include_router(builder_router)
 app.include_router(webphone_router)
 app.include_router(assistant.router)
+app.include_router(chatgpt.router)
 app.include_router(stt.router)
 app.include_router(recordings_router)
+app.include_router(history_router)
 app.include_router(providers_router)
 
 
@@ -148,10 +153,11 @@ def list_campaigns():
 def campaign_detail(cid: str):
     c = _get(cid)
     recs = store.recipients(cid)
+    calls = latest_by_recipient(cid)  # each recipient's latest call: what was asked and answered
     return _summary(c, recs) | {
         "by_language": _group(recs, "language"),
         "by_segment": _group(recs, "segment"),
-        "handling": c["handling"],
+        "handling": c["handling"] | {"recordings": recstore.handling(c)},  # what is done with audio now, for older campaigns too
         "retry_estimate_inr": round(sum(r["outcome"] in NON_RESPONDER for r in recs) * RETRY_ESTIMATE_PER_CALL, 1),
         "retry_policy": c["retry"],
         "note": c["note"],
@@ -159,7 +165,7 @@ def campaign_detail(cid: str):
         "system_prompt": c["system_prompt"], "ivr": audio.audio_status(c), "synthesising": cid in audio._active,
         "scripts": [{"language": LANGUAGES.get(l, l), "code": l} | s for l, s in c["scripts"].items()],
         "questions": _question_results(c["questions"], recs),
-        "recipients": [store.public_recipient(r, c["questions"]) for r in recs],
+        "recipients": [store.public_recipient(r, c["questions"]) | {"last_call": calls.get(r["id"])} for r in recs],
     }
 
 

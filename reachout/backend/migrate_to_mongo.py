@@ -21,6 +21,7 @@ def main(path: str) -> None:
     if not os.path.exists(path):
         sys.exit(f"No SQLite database at {path}")
     src, dst = SqliteStore(path), MongoStore()
+    src.init()  # adds tables/columns newer than the file (e.g. saved recordings); changes nothing else
     dst.init()
     raw = sqlite3.connect(path)
     raw.row_factory = sqlite3.Row
@@ -32,6 +33,9 @@ def main(path: str) -> None:
         calls = [dict(r) for r in raw.execute(
             "SELECT campaign_id, recipient_id, call_sid, at, answered, outcome FROM calls WHERE campaign_id = ?", (c["id"],))]
         dst.insert_campaign(c, src.recipients(c["id"]), calls)
+        for a in raw.execute("SELECT a.* FROM recording_audio a JOIN recipients r ON r.id = a.recipient_id "
+                             "WHERE r.campaign_id = ?", (c["id"],)):
+            dst.save_recording(a["recipient_id"], bytes(a["data"]), a["content_type"], bool(a["encrypted"]))
         copied += 1
         print(f"copied {c['id']}: {len(src.recipients(c['id']))} recipients, {len(calls)} calls")
     log = [dict(r) for r in raw.execute("SELECT at, action, target, client FROM access_log ORDER BY id")]
