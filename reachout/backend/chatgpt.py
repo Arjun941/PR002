@@ -167,7 +167,8 @@ def finish(params: dict[str, str]) -> None:
         tok = resp.json()
         step = "ID token check"
         claims = jwt.decode(tok["id_token"], jwt.PyJWKClient(JWKS).get_signing_key_from_jwt(tok["id_token"]).key,
-                            algorithms=["RS256", "ES256"], audience=issued, issuer=ISSUER)
+                            algorithms=["RS256", "ES256"], audience=issued, issuer=ISSUER,
+                            leeway=60)  # tolerate a slightly slow local clock (iat is checked strictly)
     except (ChatGPTError, Reauthorize):
         raise
     except Exception as exc:  # network, HTTP, bad token: never echo the body or the tokens
@@ -234,7 +235,13 @@ def _pick_model(headers: dict) -> str:
     if _model is None:
         resp = httpx.get(f"{API}/models", headers=headers, timeout=30)
         resp.raise_for_status()
-        listed = [m["id"] for m in resp.json().get("data", []) if m.get("visibility", "list") == "list"]
+        body = resp.json()
+        # Plan-usage endpoint answers {"models": [{"slug", "visibility", "priority"}]}; the public API
+        # answers {"data": [{"id"}]}. Accept both and take the highest-priority listed model.
+        items = body.get("models") or body.get("data") or []
+        items = sorted(items, key=lambda m: m.get("priority", 1e9))
+        listed = [m.get("slug") or m.get("id") for m in items
+                  if m.get("visibility", "list") == "list" and m.get("supported_in_api", True) and (m.get("slug") or m.get("id"))]
         if not listed:
             raise ChatGPTError("ChatGPT offered no model; set CHATGPT_MODEL")
         _model = listed[0]

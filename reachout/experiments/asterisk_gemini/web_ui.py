@@ -15,7 +15,7 @@ import os
 import queue
 import threading
 
-from flask import Flask, Response
+from flask import Flask, Response, request
 from flask_sock import Sock
 from google import genai
 from google.genai import types
@@ -71,8 +71,14 @@ async def relay(inbox: "asyncio.Queue[bytes | None]", outbox: "queue.Queue[bytes
             t.result()
 
 
+TOKEN = os.getenv("PHONE_TOKEN", "")  # if set, /ws requires ?token=... (the relay is reachable from the internet)
+
+
 @sock.route("/ws")
 def ws_handler(ws):
+    if TOKEN and request.args.get("token") != TOKEN:
+        ws.close(reason=1008, message="bad token")
+        return
     outbox: queue.Queue = queue.Queue()
     loop = asyncio.new_event_loop()
     inbox: asyncio.Queue = asyncio.Queue()  # only touched via loop.call_soon_threadsafe / inside the loop
@@ -104,6 +110,13 @@ def ws_handler(ws):
         pass
     finally:
         loop.call_soon_threadsafe(inbox.put_nowait, None)
+
+
+@app.get("/phone")
+def phone():
+    """Same mock-phone page that is deployed to Vercel, served from here so it needs no other host."""
+    with open(os.path.join(os.path.dirname(__file__), "phone", "index.html"), encoding="utf-8") as f:
+        return Response(f.read(), mimetype="text/html")
 
 
 @app.get("/")

@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0b0d10">
+<title>Reachout Phone</title>
+<style>
+  :root { --bg:#0b0d10; --panel:#14171c; --line:#232830; --text:#eceff3; --muted:#8a919b; --accent:#4de8b2; --red:#ff5d5d; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 16px system-ui, -apple-system, sans-serif; }
+  body { display: flex; justify-content: center; }
+  .phone { width: 100%; max-width: 420px; height: 100dvh; display: flex; flex-direction: column;
+           padding: env(safe-area-inset-top) 20px calc(env(safe-area-inset-bottom) + 16px); }
+  .screen { display: none; flex: 1; flex-direction: column; }
+  .screen.on { display: flex; }
+  .status { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; color: var(--muted); font-size: 13px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
+  .dot.ok { background: var(--accent); } .dot.bad { background: var(--red); }
+  button { font: inherit; color: inherit; border: 0; cursor: pointer; }
+
+  /* dialer */
+  #number { text-align: center; font-size: 32px; min-height: 48px; margin: 24px 0 8px; letter-spacing: 1px; word-break: break-all; }
+  .contact { text-align: center; color: var(--muted); min-height: 20px; }
+  .pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px 18px; margin: auto 0 18px; padding: 0 8px; }
+  .key { aspect-ratio: 1.25; border-radius: 999px; background: var(--panel); font-size: 28px; display: flex; flex-direction: column;
+         align-items: center; justify-content: center; line-height: 1; }
+  .key small { font-size: 10px; color: var(--muted); letter-spacing: 2px; margin-top: 4px; min-height: 10px; }
+  .key:active { background: #1d2127; }
+  .row { display: grid; grid-template-columns: repeat(3, 1fr); align-items: center; justify-items: center; padding: 0 8px; margin-bottom: 8px; }
+  .call { width: 72px; height: 72px; border-radius: 50%; background: var(--accent); color: #04130d; display: grid; place-items: center; }
+  .call:disabled { opacity: .4; }
+  .del { color: var(--muted); font-size: 24px; background: none; width: 56px; height: 56px; }
+  svg { width: 30px; height: 30px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+  /* in call */
+  .who { text-align: center; margin-top: 40px; }
+  .avatar { width: 96px; height: 96px; border-radius: 50%; background: linear-gradient(135deg,#2b3a35,#18211f); margin: 0 auto 16px;
+            display: grid; place-items: center; font-size: 36px; position: relative; }
+  .avatar.speaking::after { content:""; position:absolute; inset:-8px; border-radius:50%; border:2px solid var(--accent); opacity:.6; animation: pulse 1.2s infinite; }
+  @keyframes pulse { from { transform: scale(.95); opacity:.7 } to { transform: scale(1.12); opacity:0 } }
+  .name { font-size: 24px; } .timer { color: var(--muted); margin-top: 4px; font-variant-numeric: tabular-nums; }
+  #transcript { flex: 1; overflow-y: auto; margin: 20px 0; display: flex; flex-direction: column; gap: 8px; }
+  .m { padding: 9px 12px; border-radius: 14px; background: var(--panel); max-width: 85%; font-size: 14px; }
+  .m.you { align-self: flex-end; background: #1b2a25; }
+  .m.err { background: #3a1d1d; color: #ffb4b4; align-self: stretch; max-width: 100%; }
+  #meter { height: 4px; border-radius: 2px; background: var(--panel); overflow: hidden; margin-bottom: 14px; }
+  #meter i { display: block; height: 100%; width: 0; background: var(--accent); }
+  .actions { display: flex; justify-content: center; gap: 36px; }
+  .round { width: 64px; height: 64px; border-radius: 50%; background: var(--panel); display: grid; place-items: center; }
+  .round.on { background: var(--text); color: #000; }
+  .end { background: var(--red); color: #fff; width: 72px; height: 72px; }
+
+  /* settings */
+  .field { margin: 10px 0; } label { display: block; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+  input { width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; }
+  .btn { padding: 12px 16px; border-radius: 10px; background: var(--accent); color: #04130d; font-weight: 600; width: 100%; margin-top: 12px; }
+  .link { background: none; color: var(--muted); font-size: 13px; }
+  p.note { color: var(--muted); font-size: 13px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="phone">
+
+  <section class="screen on" id="dial">
+    <div class="status"><span><i class="dot" id="srv-dot"></i><span id="srv-text">not connected</span></span><button class="link" id="open-set">Settings</button></div>
+    <div id="number"></div>
+    <div class="contact" id="contact">Dial 1 for the Gemini assistant</div>
+    <div class="pad" id="pad"></div>
+    <div class="row">
+      <span></span>
+      <button class="call" id="call" aria-label="Call" disabled><svg viewBox="0 0 24 24"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.9.7 2.8a2 2 0 0 1-.4 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg></button>
+      <button class="del" id="del" aria-label="Delete">⌫</button>
+    </div>
+  </section>
+
+  <section class="screen" id="incall">
+    <div class="who">
+      <div class="avatar" id="avatar">G</div>
+      <div class="name">Gemini assistant</div>
+      <div class="timer" id="timer">Connecting…</div>
+    </div>
+    <div id="transcript"></div>
+    <div id="meter"><i></i></div>
+    <div class="actions">
+      <button class="round" id="mute" aria-label="Mute"><svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v4"/></svg></button>
+      <button class="round end" id="end" aria-label="End call"><svg viewBox="0 0 24 24" style="transform:rotate(135deg)"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.9.7 2.8a2 2 0 0 1-.4 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg></button>
+    </div>
+  </section>
+
+  <section class="screen" id="settings">
+    <div class="status"><span>Settings</span><button class="link" id="close-set">Done</button></div>
+    <p class="note">The phone talks to your laptop over a tunnel. Run <b>web_ui.py</b> and <b>cloudflared tunnel --url http://localhost:5000</b>, then paste the tunnel address and token below. Or open the link the setup script printed, which fills both in.</p>
+    <div class="field"><label for="srv">Server (wss:// address)</label><input id="srv" placeholder="wss://example.trycloudflare.com" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
+    <div class="field"><label for="tok">Access token</label><input id="tok" placeholder="token" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
+    <button class="btn" id="save">Save</button>
+  </section>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const LETTERS = { 2:'ABC',3:'DEF',4:'GHI',5:'JKL',6:'MNO',7:'PQRS',8:'TUV',9:'WXYZ',0:'+' };
+const store = { get: k => { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
+                set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+
+// ---- config: #server=wss://...&token=... in the URL wins, then saved values
+(() => {
+  const h = new URLSearchParams(location.hash.slice(1));
+  if (h.get('server')) store.set('server', h.get('server'));
+  if (h.get('token')) store.set('token', h.get('token'));
+  if (h.get('server') || h.get('token')) history.replaceState(null, '', location.pathname);
+})();
+if (location.pathname === '/phone' && !store.get('server')) store.set('server', (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
+$('srv').value = store.get('server'); $('tok').value = store.get('token');
+
+const show = id => document.querySelectorAll('.screen').forEach(s => s.classList.toggle('on', s.id === id));
+
+// ---- dialer
+let digits = '';
+const paint = () => {
+  $('number').textContent = digits;
+  $('contact').textContent = digits === '1' ? 'Gemini assistant' : digits ? '' : 'Dial 1 for the Gemini assistant';
+  $('call').disabled = digits !== '1' || !store.get('server');
+};
+['1','2','3','4','5','6','7','8','9','*','0','#'].forEach(k => {
+  const b = document.createElement('button'); b.className = 'key';
+  b.innerHTML = `${k}<small>${LETTERS[k] || ''}</small>`;
+  b.onclick = () => { if (digits.length < 15) { digits += k; paint(); } };
+  $('pad').appendChild(b);
+});
+$('del').onclick = () => { digits = digits.slice(0, -1); paint(); };
+$('open-set').onclick = () => show('settings');
+$('close-set').onclick = () => show('dial');
+$('save').onclick = () => { store.set('server', $('srv').value.trim()); store.set('token', $('tok').value.trim()); paint(); check(); show('dial'); };
+
+// ---- reachability: open a socket just to see if the relay answers
+function check() {
+  const srv = store.get('server');
+  $('srv-dot').className = 'dot'; $('srv-text').textContent = srv ? 'checking…' : 'not connected';
+  if (!srv) return;
+  const probe = new WebSocket(`${srv.replace(/\/$/, '')}/ws?token=${encodeURIComponent(store.get('token'))}`);
+  const t = setTimeout(() => probe.close(), 6000);
+  probe.onmessage = () => { /* got 'ready': relay + Gemini work */ };
+  probe.onopen = () => { $('srv-dot').className = 'dot ok'; $('srv-text').textContent = 'server online'; };
+  probe.onerror = probe.onclose = () => { clearTimeout(t); if ($('srv-text').textContent !== 'server online') { $('srv-dot').className = 'dot bad'; $('srv-text').textContent = 'server unreachable'; } };
+  probe.onopen = () => { clearTimeout(t); $('srv-dot').className = 'dot ok'; $('srv-text').textContent = 'server online'; probe.close(); };
+}
+
+// ---- call
+const workletSrc = `class P extends AudioWorkletProcessor {
+  process(inputs) {
+    const ch = inputs[0][0];
+    if (ch) {
+      const out = new Int16Array(ch.length); let peak = 0;
+      for (let i = 0; i < ch.length; i++) { const s = Math.max(-1, Math.min(1, ch[i])); out[i] = s * 32767; peak = Math.max(peak, Math.abs(s)); }
+      this.port.postMessage({ pcm: out.buffer, peak }, [out.buffer]);
+    }
+    return true;
+  }
+}
+registerProcessor('p', P);`;
+
+let ws, ctx, playCtx, stream, node, playAt = 0, sources = [], muted = false, ready = false, ticker, t0, last = {}, speakTimer;
+
+function say(kind, text) {
+  if (last.kind === kind && last.el && last.el.isConnected && kind !== 'err') { last.el.textContent += text; }
+  else {
+    const el = document.createElement('div'); el.className = 'm ' + kind; el.textContent = text;
+    $('transcript').appendChild(el); last = { kind, el };
+  }
+  $('transcript').scrollTop = 1e9;
+}
+function play(buf) {
+  const pcm = new Int16Array(buf), f = new Float32Array(pcm.length);
+  for (let i = 0; i < pcm.length; i++) f[i] = pcm[i] / 32768;
+  const ab = playCtx.createBuffer(1, f.length, 24000); ab.copyToChannel(f, 0);
+  const src = playCtx.createBufferSource(); src.buffer = ab; src.connect(playCtx.destination);
+  playAt = Math.max(playAt, playCtx.currentTime + 0.05); src.start(playAt); playAt += ab.duration;
+  sources.push(src); src.onended = () => { sources = sources.filter(s => s !== src); };
+  $('avatar').classList.add('speaking'); clearTimeout(speakTimer);
+  speakTimer = setTimeout(() => $('avatar').classList.remove('speaking'), (playAt - playCtx.currentTime) * 1000 + 200);
+}
+function flush() { sources.forEach(s => { try { s.stop(); } catch {} }); sources = []; playAt = 0; $('avatar').classList.remove('speaking'); }
+
+async function startCall() {
+  show('incall'); $('timer').textContent = 'Connecting…'; $('transcript').innerHTML = ''; last = {}; ready = false; muted = false;
+  $('mute').classList.remove('on');
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    ctx = new AudioContext({ sampleRate: 16000 }); playCtx = new AudioContext({ sampleRate: 24000 });
+    await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([workletSrc], { type: 'text/javascript' })));
+    node = new AudioWorkletNode(ctx, 'p'); ctx.createMediaStreamSource(stream).connect(node);
+    const srv = store.get('server').replace(/\/$/, '');
+    ws = new WebSocket(`${srv}/ws?token=${encodeURIComponent(store.get('token'))}`); ws.binaryType = 'arraybuffer';
+    node.port.onmessage = e => {
+      $('meter').firstElementChild.style.width = muted ? '0' : Math.min(100, e.data.peak * 140) + '%';
+      if (ws && ws.readyState === 1 && ready && !muted) ws.send(e.data.pcm);
+    };
+    ws.onmessage = e => {
+      if (e.data instanceof ArrayBuffer) return play(e.data);
+      const m = JSON.parse(e.data);
+      if (m.type === 'ready') { ready = true; t0 = Date.now(); ticker = setInterval(tick, 500); tick(); }
+      else if (m.type === 'interrupted') flush();
+      else if (m.type === 'turn_end') last = {};
+      else if (m.type === 'you' || m.type === 'gemini') say(m.type, m.text);
+      else if (m.type === 'error') { say('err', m.text); endCall(false); }
+    };
+    ws.onclose = () => { if (!ready) say('err', 'Could not reach the server. Check Settings.'); endCall(false); };
+  } catch (e) { say('err', String(e.message || e)); endCall(false); }
+}
+const tick = () => { const s = Math.floor((Date.now() - t0) / 1000); $('timer').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+
+function endCall(leave = true) {
+  clearInterval(ticker); flush();
+  try { ws && ws.close(); } catch {}
+  stream && stream.getTracks().forEach(t => t.stop());
+  ctx && ctx.close(); playCtx && playCtx.close();
+  ws = ctx = playCtx = stream = node = null; ready = false;
+  $('meter').firstElementChild.style.width = 0;
+  if (leave) { digits = ''; paint(); show('dial'); }
+  else { $('timer').textContent = 'Call ended'; setTimeout(() => { digits = ''; paint(); show('dial'); }, 3500); }
+}
+$('call').onclick = startCall;
+$('end').onclick = () => endCall(true);
+$('mute').onclick = () => { muted = !muted; $('mute').classList.toggle('on', muted); };
+
+paint(); check();
+if (!store.get('server')) show('settings');
+</script>
+</body>
+</html>

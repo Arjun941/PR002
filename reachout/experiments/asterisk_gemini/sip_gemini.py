@@ -152,6 +152,7 @@ class SIP(asyncio.DatagramProtocol):
     def datagram_received(self, data, addr):
         try:
             first, hdrs, body = parse(data)
+            log.info("rx %s from %s", first[:60], addr[0])
             if first.startswith("SIP/2.0") or "call-id" not in hdrs:
                 return
             method = first.split()[0]
