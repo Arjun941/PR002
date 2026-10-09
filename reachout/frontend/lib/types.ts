@@ -23,6 +23,14 @@ export interface Recipient {
   missing?: string[]; // decided, but these questions are still unanswered
 }
 export interface UnseenCall { call_id: string; campaign_id: string; recipient: string; at: string }
+export type NoticeKind = "reminder" | "update";
+export interface AudienceInfo { counts: Record<string, number>; labels: Record<string, string>; total: number; selected: number }
+export interface NoticeView {
+  id: string; campaign_id: string; kind: NoticeKind; status: "scheduled" | "sending" | "done" | "cancelled"; send_at: string; created_at: string;
+  finished_at: string | null; outcomes: string[]; texts: Record<string, string>; note: string | null;
+  progress: { total: number; delivered: number; failed: number; waiting: number };
+  targets: { name: string; state: "pending" | "calling" | "delivered" | "failed"; attempts: number; call_id: string | null }[];
+}
 export interface QA { question: string; answer: string }
 export interface LastCall { call_id: string; qa: QA[]; summary: string; talk_seconds: number | null; ended_at: string; analysis: string }
 export interface CallRecord {
@@ -33,6 +41,7 @@ export interface CallRecord {
   recording: { saved: boolean; note: string; seconds: number };
   analysis: { status: "pending" | "done" | "failed" | "off" | "none"; note?: string; by?: string };
   final_heard: string | null; summary: string; has_recording: boolean; qa_count?: number;
+  kind?: "call" | "notice"; notice_kind?: NoticeKind | null;
   answers_corrected?: { question: string; saved: string | null; heard: string }[];
   qa?: QA[]; transcript?: { speaker: "agent" | "person"; text: string }[]; keys_pressed?: string[]; event_title?: string | null;
 }

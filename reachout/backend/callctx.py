@@ -92,6 +92,11 @@ def instructions(c: dict, r: dict, ivr_done: str = "", on_end_tool: bool = True)
     if written:
         parts += ["", f"The approved script in {lang}. Say it in your own natural words, keeping the facts exactly:"]
         parts += [f"- {k}: {fill(v, c, r)}" for k, v in written]
+    if c.get("_notice"):  # a reminder or update (notices.py): the script above is the message
+        parts += ["", f"THIS CALL IS A {str(c['_notice']).upper()} TO SOMEONE WHO IS ALREADY PART OF THIS EVENT. Say the message in your own natural "
+                      "words (keep every fact exactly), then ask if they have questions and answer them from the facts above. Do not ask for a "
+                      "decision, do not ask follow-up questions and do not save anything. When they have no more questions, say a short goodbye."]
+        return "\n".join(parts)
     if ivr_done:
         parts += ["", f"The person has just finished an automated menu and chose: {ivr_done}. Their decision and follow-up "
                       "answers are already saved. They then started asking a question: their first words reach you "

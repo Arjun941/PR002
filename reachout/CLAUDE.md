@@ -41,6 +41,11 @@ reminders). Telephony was Exotel; it was removed for now (2026-10-09, on request
   Sign in with ChatGPT (`backend/chatgpt.py`, strip in the assistant panel): when connected, `llm.run_json` tries the
   connected plan first for drafts and the assistant, then the campaign's own model, then templates. It only writes text;
   live calls stay on ElevenLabs/Gemini. One account per install. Refresh/`/models`/SSE details UNVERIFIED.
+  Reminders and updates (`backend/notices.py`, `NoticeDrawer.tsx`, "Remind / update" on the campaign page): a spoken message about the
+  event, written by the assistant (or typed, then translated into every campaign language), sent to people chosen by outcome (confirmed,
+  declined, voicemail, unfinished ...) now or at a set time. Delivery is a web-phone call run by a background runner, one call at a time,
+  through `webphone._converse` with a synthetic campaign (`_notice`); the audience is decided when it is due; calls never touch a
+  recipient's campaign outcome/answers and appear in History tagged Reminder/Update. Stored in `notices` (both backends).
   Call history (`/history` page, `backend/history.py`): `recwire.py` writes one record per call when it ends
   (`store.save_call`, table/collection `call_history`: ring/answer/end times, outcome, keypad answers, recording status
   with the reason when there is none); `callinsight.py` then sends the stereo recording (agent left, person right) to

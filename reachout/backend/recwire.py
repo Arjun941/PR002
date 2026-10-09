@@ -68,8 +68,13 @@ class _Call:
 
     def __init__(self, sid: str, info: dict):
         self.sid, self.info = sid, info
-        self.r = (store.recipient_by_call(sid) or store.recipient_for_call(sid)) if sid else None
-        self.c = store.campaign(self.r["campaign_id"]) if self.r else None
+        self.notice = info.get("notice")  # a reminder/update call (notices.py): the recipient is named, not "in flight"
+        if self.notice:
+            self.r = store.recipient(self.notice["recipient_id"])
+            self.c = store.campaign(self.notice["campaign_id"])
+        else:
+            self.r = (store.recipient_by_call(sid) or store.recipient_for_call(sid)) if sid else None
+            self.c = store.campaign(self.r["campaign_id"]) if self.r else None
         self.recording = recstore.wanted(self.c) if self.c else recstore.saving()
         self.rec = callrec.CallRecorder() if self.recording else None
         self.rang_at, self.answered_at, self.until = _now_iso(), None, 0.0
@@ -153,7 +158,7 @@ class _Tap:
 async def _finish(call: _Call, ended_at: str) -> None:
     try:
         await asyncio.sleep(SETTLE_SECONDS)
-        r = store.recipient_for_call(call.sid) or (store.recipient(call.r["id"]) if call.r else None)
+        r = call.r if call.notice else (store.recipient_for_call(call.sid) or (store.recipient(call.r["id"]) if call.r else None))
         if call.c and not store.campaign(call.c["id"]):
             return  # the campaign was deleted meanwhile: keep nothing of this call
         c = call.c or (store.campaign(r["campaign_id"]) if r else None)
@@ -170,7 +175,7 @@ async def _finish(call: _Call, ended_at: str) -> None:
                 why = recstore.save(call.sid, wav, "audio/wav", r["campaign_id"] if r else None, r["id"] if r else None)
                 rec_note = why or ""
                 if not why:
-                    if r:
+                    if r and not call.notice:  # a reminder's audio lives in History only; the recipient's own link stays theirs
                         store.set_recording_url(r["id"], recstore.url_for(call.sid))  # only if it has none yet
                     stereo = await asyncio.to_thread(call.rec.to_wav, True)
                     log.info("call %s recorded: %.0f s played to the person, %.0f s heard from them", call.sid, ours, theirs)
@@ -182,12 +187,14 @@ async def _finish(call: _Call, ended_at: str) -> None:
             "recipient_id": (r or {}).get("id"), "recipient_name": (r or {}).get("name") or call.info.get("recipient"),
             "phone": mask_phone(r["phone"]) if r else None,
             "language": LANGUAGES.get((r or {}).get("language"), (r or {}).get("language")) or call.info.get("language"),
-            "provider": call.info.get("provider"), "mode": call.info.get("mode") or (c or {}).get("mode"),
+            "provider": call.info.get("provider"), "mode": "notice" if call.notice else (call.info.get("mode") or (c or {}).get("mode")),
+            "kind": "notice" if call.notice else "call", "notice_id": (call.notice or {}).get("id"), "notice_kind": (call.notice or {}).get("kind"),
             "rang_at": call.rang_at, "answered_at": call.answered_at, "ended_at": ended_at,
             "ring_seconds": secs(call.rang_at, call.answered_at or ended_at), "talk_seconds": secs(call.answered_at, ended_at),
-            "outcome": (r or {}).get("outcome"), "channel": (r or {}).get("channel"), "attempt": (r or {}).get("attempts"),
+            "outcome": None if call.notice else (r or {}).get("outcome"), "channel": None if call.notice else (r or {}).get("channel"),
+            "attempt": None if call.notice else (r or {}).get("attempts"),
             "keys_pressed": [k for k in call.keys if k],
-            "answers": public_recipient(r, (c or {}).get("questions") or [])["answers"] if r else {},
+            "answers": {} if call.notice else (public_recipient(r, (c or {}).get("questions") or [])["answers"] if r else {}),
             "recording": {"saved": not rec_note, "note": rec_note, "seconds": round(seconds, 1)},
             "analysis": {"status": "pending" if stereo and callinsight.enabled() else "none"},
             "summary": "", "qa": [], "transcript": [], "final_heard": None,

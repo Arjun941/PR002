@@ -45,6 +45,11 @@ CREATE TABLE IF NOT EXISTS call_history (
 );
 CREATE INDEX IF NOT EXISTS call_history_rang ON call_history(rang_at);
 CREATE INDEX IF NOT EXISTS call_history_campaign ON call_history(campaign_id);
+CREATE TABLE IF NOT EXISTS notices (
+  id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL, send_at TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS notices_campaign ON notices(campaign_id);
+CREATE INDEX IF NOT EXISTS notices_status ON notices(status);
 CREATE TABLE IF NOT EXISTS access_log (
   id INTEGER PRIMARY KEY, at TEXT NOT NULL, action TEXT NOT NULL, target TEXT, client TEXT
 );
@@ -174,6 +179,7 @@ class SqliteStore:
             db.execute("DELETE FROM recording_audio WHERE campaign_id = ? OR call_id IN "
                        "(SELECT id FROM recipients WHERE campaign_id = ?)", (cid, cid))  # the second: recordings from before calls had ids
             db.execute("DELETE FROM call_history WHERE campaign_id = ?", (cid,))
+            db.execute("DELETE FROM notices WHERE campaign_id = ?", (cid,))
             db.execute("DELETE FROM recipients WHERE campaign_id = ?", (cid,))
             return db.execute("DELETE FROM campaigns WHERE id = ?", (cid,)).rowcount > 0
 
@@ -428,6 +434,30 @@ class SqliteStore:
         with self._tx() as db:
             q = "SELECT data FROM call_history" + (" WHERE campaign_id = ?" if campaign_id else "") + " ORDER BY rang_at DESC LIMIT ?"
             return [json.loads(r["data"]) for r in db.execute(q, ((campaign_id,) if campaign_id else ()) + (limit,))]
+
+    # ---------- reminders and updates ----------
+
+    def save_notice(self, n: dict) -> None:
+        """Creates or replaces one reminder/update (`id`; its targets and progress live inside the record)."""
+        with self._tx() as db:
+            db.execute("INSERT OR REPLACE INTO notices (id, campaign_id, send_at, status, data) VALUES (?, ?, ?, ?, ?)",
+                       (n["id"], n["campaign_id"], n["send_at"], n["status"], json.dumps(n)))
+
+    def get_notice(self, nid: str) -> dict | None:
+        with self._tx() as db:
+            row = db.execute("SELECT data FROM notices WHERE id = ?", (nid,)).fetchone()
+        return json.loads(row["data"]) if row else None
+
+    def list_notices(self, campaign_id: str | None = None, statuses: list[str] | None = None) -> list[dict]:
+        """Newest first (by when they were created)."""
+        q, args = "SELECT data FROM notices WHERE 1 = 1", []
+        if campaign_id:
+            q, args = q + " AND campaign_id = ?", args + [campaign_id]
+        if statuses:
+            q, args = q + f" AND status IN ({', '.join('?' * len(statuses))})", args + list(statuses)
+        with self._tx() as db:
+            rows = [json.loads(r["data"]) for r in db.execute(q, args)]
+        return sorted(rows, key=lambda n: n.get("created_at", ""), reverse=True)
 
     # ---------- access log ----------
 

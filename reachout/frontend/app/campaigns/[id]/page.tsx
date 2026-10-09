@@ -4,10 +4,11 @@ import { useRouter } from "next/navigation";
 import { Fragment, use, useEffect, useRef, useState } from "react";
 import { api, post } from "@/lib/api";
 import { ago, CHANNEL, fmt, KIND, ORDER, OUT } from "@/lib/format";
-import { SCRIPT_FIELDS, type Detail, type Recipient } from "@/lib/types";
+import { SCRIPT_FIELDS, type Detail, type NoticeView, type Recipient } from "@/lib/types";
 import { useData, usePoll } from "@/components/hooks";
 import { Icon } from "@/components/Icon";
 import { Listen } from "@/components/Listen";
+import { NoticeDrawer } from "@/components/NoticeDrawer";
 import { useCrumbs, useShell } from "@/components/Shell";
 import { Breakdown, ErrorView, HandlingCard, Notice, OutcomePill, Skeleton, Stat, StatusPill } from "@/components/ui";
 
@@ -123,6 +124,20 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
   usePoll(refresh, 2500, !!d && (d.status === "running" || d.status === "preparing" || d.synthesising || d.totals.retrying > 0));
+
+  // Reminders and updates. Hooks must come before the early returns below.
+  const [noticeOpen, setNoticeOpen] = useState(false);
+  const [notices, setNotices] = useState<NoticeView[]>([]);
+  const loadNotices = () => api<{ notices: NoticeView[] }>(`/campaigns/${id}/notices`).then(r => setNotices(r.notices)).catch(() => { /* keep the last list */ });
+  useEffect(() => { void loadNotices(); }, [id]);  // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {  // while one is waiting or being sent, keep its progress fresh
+    if (!notices.some(n => n.status === "sending" || n.status === "scheduled")) return;
+    const t = setInterval(() => void loadNotices(), 4000);
+    return () => clearInterval(t);
+  }, [notices]);  // eslint-disable-line react-hooks/exhaustive-deps
+  const cancelNotice = async (nid: string) => {
+    try { await post(`/notices/${nid}/cancel`); toast("Cancelled"); await loadNotices(); } catch (e) { toast((e as Error).message, "error"); }
+  };
 
   if (error !== null) return <main className="view"><ErrorView status={error} retry={retry} /></main>;
   if (!d) return <main className="view"><Skeleton /></main>;
@@ -261,6 +276,9 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
             {busy ? `Retrying ${fmt.int(s.retrying)}` : "Retry unreached or unfinished"}
             {!busy && n > 0 && <span className="count">{fmt.int(n)}</span>}
           </button>
+          <button className="btn" onClick={() => setNoticeOpen(true)} title="Send a reminder or an update about the event to chosen people">
+            <Icon name="bell" />Remind / update
+          </button>
           <button className="btn" disabled={calling} onClick={() => router.push(`/campaigns/${id}/edit`)}
             title={calling ? "Pause the campaign before editing it" : "Edit campaign"}><Icon name="type" />Edit</button>
           {d.status === "completed" && (
@@ -291,6 +309,37 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
       {d.system_prompt && <SystemPrompt d={d} />}
       {d.scripts.length > 0 && <Scripts d={d} id={id} refresh={refresh} />}
 
+      {notices.length > 0 && (
+        <section className="card" aria-label="Reminders and updates">
+          <div className="card-head"><h2>Reminders and updates</h2></div>
+          <div className="table-wrap">
+            <table className="table">
+              <thead><tr><th>Type</th><th>Message</th><th>Sent to</th><th>When</th><th>Status</th><th><span className="sr-only">Actions</span></th></tr></thead>
+              <tbody>
+                {notices.map(n => (
+                  <tr key={n.id}>
+                    <td><span className="chip">{n.kind === "reminder" ? "Reminder" : "Update"}</span></td>
+                    <td style={{ maxWidth: 340 }} title={Object.values(n.texts).join("\n")}>{Object.values(n.texts)[0]}</td>
+                    <td className="muted">{n.outcomes.join(", ").replace(/_/g, " ")}</td>
+                    <td className="muted">{new Date(n.send_at).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}</td>
+                    <td>
+                      {n.status === "scheduled" && <span className="pill"><i className="dot" style={{ background: "var(--c-pending)" }} />Scheduled</span>}
+                      {n.status === "sending" && <span className="pill"><i className="dot" style={{ background: "var(--c-rescheduled)" }} />Sending {n.progress.delivered + n.progress.failed} of {n.progress.total}</span>}
+                      {n.status === "done" && <span className="pill"><i className="dot" style={{ background: "var(--c-confirmed)" }} />Delivered to {n.progress.delivered} of {n.progress.total}{n.progress.failed > 0 && `, ${n.progress.failed} did not answer`}</span>}
+                      {n.status === "cancelled" && <span className="pill muted"><i className="dot" />Cancelled</span>}
+                      {n.note && <div className="cell-sub">{n.note}{" "}
+                        <a href={`${window.location.protocol}//${window.location.hostname}:8000/phone`} target="_blank" rel="noreferrer">Open the phone page</a>
+                        {" "}(use the same address you use for calls: a tunnel link if the phone is not this computer).</div>}
+                    </td>
+                    <td className="num">{(n.status === "scheduled" || n.status === "sending") && <button className="btn sm ghost" onClick={() => void cancelNotice(n.id)}>Cancel</button>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+      {noticeOpen && <NoticeDrawer cid={id} languages={d.scripts.map(x => ({ code: x.code, name: x.language }))} onClose={() => setNoticeOpen(false)} onSent={() => void loadNotices()} />}
       <section className="card">
         <div className="card-head"><h2>Recipients</h2>
           <div className="filters">

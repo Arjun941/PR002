@@ -57,6 +57,7 @@ class MongoStore:
         self.campaigns_c, self.recipients_c = self.db["campaigns"], self.db["recipients"]
         self.calls_c, self.access_c = self.db["calls"], self.db["access_log"]
         self.audio_c = self.db["recording_audio"]  # one document per call, keyed by call id
+        self.notices_c = self.db["notices"]  # reminders and updates, with their targets and progress
         self.history_c = self.db["call_history"]  # one document per call: timings, outcome, answers, transcript
 
     def init(self) -> None:
@@ -70,6 +71,8 @@ class MongoStore:
         self.audio_c.create_index("campaign_id")
         self.history_c.create_index([("rang_at", DESCENDING)])
         self.history_c.create_index("campaign_id")
+        self.notices_c.create_index("campaign_id")
+        self.notices_c.create_index("status")
 
     def _log(self, r: dict, outcome: str, at: str | None = None) -> None:
         self.calls_c.insert_one({"campaign_id": r["campaign_id"], "recipient_id": r["id"], "call_sid": r["call_sid"],
@@ -131,6 +134,7 @@ class MongoStore:
         ids = [d["_id"] for d in self.recipients_c.find({"campaign_id": cid}, {"_id": 1})]
         self.audio_c.delete_many({"$or": [{"campaign_id": cid}, {"_id": {"$in": ids}}]})  # the second: recordings from before calls had ids
         self.history_c.delete_many({"campaign_id": cid})
+        self.notices_c.delete_many({"campaign_id": cid})
         self.recipients_c.delete_many({"campaign_id": cid})
         return self.campaigns_c.delete_one({"_id": cid}).deleted_count > 0
 
@@ -356,6 +360,26 @@ class MongoStore:
         """Newest first."""
         cur = self.history_c.find({"campaign_id": campaign_id} if campaign_id else {}).sort("rang_at", DESCENDING).limit(limit)
         return [{k: v for k, v in d.items() if k != "_id"} | {"id": d["_id"]} for d in cur]
+
+    # ---------- reminders and updates ----------
+
+    def save_notice(self, n: dict) -> None:
+        """Creates or replaces one reminder/update (`id`; its targets and progress live inside the record)."""
+        self.notices_c.replace_one({"_id": n["id"]}, {k: v for k, v in n.items() if k != "id"} | {"_id": n["id"]}, upsert=True)
+
+    def get_notice(self, nid: str) -> dict | None:
+        d = self.notices_c.find_one({"_id": nid})
+        return ({k: v for k, v in d.items() if k != "_id"} | {"id": d["_id"]}) if d else None
+
+    def list_notices(self, campaign_id: str | None = None, statuses: list[str] | None = None) -> list[dict]:
+        """Newest first (by when they were created)."""
+        f: dict = {}
+        if campaign_id:
+            f["campaign_id"] = campaign_id
+        if statuses:
+            f["status"] = {"$in": list(statuses)}
+        rows = [{k: v for k, v in d.items() if k != "_id"} | {"id": d["_id"]} for d in self.notices_c.find(f)]
+        return sorted(rows, key=lambda n: n.get("created_at", ""), reverse=True)
 
     # ---------- access log ----------
 

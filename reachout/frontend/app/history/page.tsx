@@ -40,6 +40,7 @@ function Detail({ id, onClose }: { id: string; onClose: () => void }) {
           <div><dt>Language</dt><dd>{c.language ?? "–"}</dd></div>
           <div><dt>Handled by</dt><dd>{c.provider ?? "–"}{c.mode && ` · ${c.mode === "hybrid" ? "keypad + agent" : "live agent"}`}</dd></div>
           <div><dt>Attempt</dt><dd>{c.attempt ?? "–"}</dd></div>
+          {c.kind === "notice" ? <div><dt>Type</dt><dd>{c.notice_kind === "update" ? "Update" : "Reminder"} (a message, not a survey)</dd></div> : null}
           <div><dt>Final answer</dt><dd><Outcome o={c.outcome} />{c.channel && <span className="muted"> by {CHANNEL[c.channel] ?? c.channel}</span>}</dd></div>
           {c.final_heard && c.final_heard !== "unclear" && c.final_heard !== c.outcome &&
             <div><dt>Heard in the recording</dt><dd>{c.final_heard}</dd></div>}
@@ -142,7 +143,7 @@ export default function HistoryPage() {
                     <td className="mono muted">{when(c.rang_at)}</td>
                     <td>{c.recipient_name ?? "–"}<div className="cell-sub mono">{c.phone ?? ""}</div></td>
                     <td>{c.campaign_name ?? "–"}<div className="cell-sub">{c.org}{c.provider && ` · ${c.provider}`}</div></td>
-                    <td><Outcome o={c.outcome} /></td>
+                    <td>{c.kind === "notice" ? <span className="chip">{c.notice_kind === "update" ? "Update" : "Reminder"}</span> : <Outcome o={c.outcome} />}</td>
                     <td className="num">{dur(c.ring_seconds)}</td>
                     <td className="num">{c.answered_at ? dur(c.talk_seconds) : <span className="muted">Not answered</span>}</td>
                     <td className="muted">{c.analysis.status === "pending" ? "Working…" : c.qa_count ? `${c.qa_count} answered` : "–"}</td>

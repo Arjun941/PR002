@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api")
 STARTED = datetime.now(timezone.utc).isoformat(timespec="seconds")  # calls before this were not ours to see
 LIST_FIELDS = ("id", "campaign_id", "campaign_name", "org", "recipient_id", "recipient_name", "phone", "language", "provider",
                "mode", "rang_at", "answered_at", "ended_at", "ring_seconds", "talk_seconds", "outcome", "channel", "attempt",
-               "answers", "recording", "analysis", "final_heard", "summary")
+               "answers", "recording", "analysis", "final_heard", "summary", "kind", "notice_kind")
 
 
 def _with_audio(calls: list[dict]) -> list[dict]:

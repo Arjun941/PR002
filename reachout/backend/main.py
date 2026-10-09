@@ -19,7 +19,7 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from . import assistant, audio, demo, dialer, store, stt
+from . import assistant, audio, demo, dialer, notices, store, stt
 from . import callctx, campaignagent, catalog, chatgpt, llm, recstore
 from .builder import (DEMO, MAX_CONTACTS, MAX_PROMPT, ChatTurnIn, Event, Question, Retry, Script, TranslateReq, handling,
                       parse_contacts, router as builder_router, translate_question)
@@ -114,7 +114,7 @@ async def lifespan(_: FastAPI):
     store.init()
     if DEMO and not store.has_campaigns():
         demo.seed()
-    tasks = [asyncio.create_task(dialer.run()), asyncio.create_task(audio.run())]
+    tasks = [asyncio.create_task(dialer.run()), asyncio.create_task(audio.run()), asyncio.create_task(notices.run())]
     tasks += [asyncio.create_task(demo.simulate())] if DEMO else []
     yield
     for t in tasks:
@@ -130,6 +130,7 @@ app.include_router(chatgpt.router)
 app.include_router(stt.router)
 app.include_router(recordings_router)
 app.include_router(history_router)
+app.include_router(notices.router)
 app.include_router(providers_router)
 
 

@@ -108,6 +108,7 @@ export default function EditCampaignPage({ params }: { params: Promise<{ id: str
   const [find, setFind] = useState("");
   const [shown, setShown] = useState(25);
   const [contactBusy, setContactBusy] = useState("");
+  const [savingQ, setSavingQ] = useState("");
 
   if (error !== null) return <main className="view"><ErrorView status={error} retry={retry} /></main>;
   if (!d || !f || !opts) return <main className="view"><Skeleton /></main>;
@@ -157,7 +158,6 @@ export default function EditCampaignPage({ params }: { params: Promise<{ id: str
   };
 
   // Saves the follow-up questions and their wording right away (the rest of the form is saved with "Save changes").
-  const [savingQ, setSavingQ] = useState("");
   const saveQuestion = async (q: Question) => {
     setSavingQ(q.id);
     try {
