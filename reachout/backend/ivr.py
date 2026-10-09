@@ -70,7 +70,7 @@ async def _escalate(line, c: dict, r: dict, outcome: str, question: bytes) -> bo
     log.info("call %s: handing over to the %s agent", line.call_sid, provider)
     try:
         await endcall.run(catalog.engine(provider)(
-            line.recv, line.send, line.clear, {"language": LANGUAGES.get(r["language"], r["language"]), "answer": outcome},
+            line.recv, endcall.AfterEnd(line.send, ended), line.clear, {"language": LANGUAGES.get(r["language"], r["language"]), "answer": outcome},
             r["language"], lambda o: record_outcome(line.call_sid, o, "agent"), preroll=question, instructions=instructions,
             on_end=ended.set), ended, lambda: line._now() >= line.until + 0.8)
     except Exception as exc:  # connect failed: the caller is still on the IVR call

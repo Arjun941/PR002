@@ -13,6 +13,25 @@ import { useCrumbs, useShell } from "@/components/Shell";
 import { Breakdown, ErrorView, HandlingCard, Notice, OutcomePill, Skeleton, Stat, StatusPill } from "@/components/ui";
 
 const NON_RESPONDER = ["voicemail", "no_answer"];
+const AUDIENCE: Record<string, string> = {
+  confirmed: "Confirmed", declined: "Declined", rescheduled: "Wants to reschedule", voicemail: "Voicemail", no_answer: "No answer",
+  pending: "Not reached yet", unfinished: "Answered but unfinished",
+};
+
+/** A reminder's message: three lines, then the full text in every language on click. {name} is shown as [name]. */
+function NoticeText({ n, languages }: { n: NoticeView; languages: { code: string; name: string }[] }) {
+  const [open, setOpen] = useState(false);
+  const texts = Object.entries(n.texts).map(([l, t]) => [languages.find(x => x.code === l)?.name ?? l, t.replace(/\{name\}/g, "[name]")] as const);
+  const first = texts[0]?.[1] ?? "";
+  return (
+    <div className="notice-msg">
+      {open ? texts.map(([l, t]) => <p key={l}><b>{l}</b> {t}</p>) : <p className="clamp">{first}</p>}
+      {(texts.length > 1 || first.length > 140) && (
+        <button type="button" className="btn sm ghost" onClick={() => setOpen(o => !o)}>{open ? "Show less" : texts.length > 1 ? `Show all ${texts.length} languages` : "Show full message"}</button>)}
+    </div>
+  );
+}
+
 const FIELD_LABEL = { greeting: "Greeting", message: "Message", menu: "Keypad menu", voicemail: "Voicemail", goodbye: "Goodbye" };
 
 function Scripts({ d, id, refresh }: { d: Detail; id: string; refresh: () => Promise<void> }) {
@@ -313,23 +332,24 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
         <section className="card" aria-label="Reminders and updates">
           <div className="card-head"><h2>Reminders and updates</h2></div>
           <div className="table-wrap">
-            <table className="table">
+            <table className="table notice-table">
+              <colgroup><col style={{ width: 96 }} /><col /><col style={{ width: 190 }} /><col style={{ width: 150 }} /><col style={{ width: 230 }} /><col style={{ width: 90 }} /></colgroup>
               <thead><tr><th>Type</th><th>Message</th><th>Sent to</th><th>When</th><th>Status</th><th><span className="sr-only">Actions</span></th></tr></thead>
               <tbody>
                 {notices.map(n => (
                   <tr key={n.id}>
                     <td><span className="chip">{n.kind === "reminder" ? "Reminder" : "Update"}</span></td>
-                    <td style={{ maxWidth: 340 }} title={Object.values(n.texts).join("\n")}>{Object.values(n.texts)[0]}</td>
-                    <td className="muted">{n.outcomes.join(", ").replace(/_/g, " ")}</td>
-                    <td className="muted">{new Date(n.send_at).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}</td>
+                    <td><NoticeText n={n} languages={d.scripts.map(x => ({ code: x.code, name: x.language }))} /></td>
+                    <td><div className="chips">{n.outcomes.map(o => <span key={o} className="chip">{AUDIENCE[o] ?? o.replace(/_/g, " ")}</span>)}</div></td>
+                    <td className="muted nowrap">{new Date(n.send_at).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })}</td>
                     <td>
                       {n.status === "scheduled" && <span className="pill"><i className="dot" style={{ background: "var(--c-pending)" }} />Scheduled</span>}
                       {n.status === "sending" && <span className="pill"><i className="dot" style={{ background: "var(--c-rescheduled)" }} />Sending {n.progress.delivered + n.progress.failed} of {n.progress.total}</span>}
-                      {n.status === "done" && <span className="pill"><i className="dot" style={{ background: "var(--c-confirmed)" }} />Delivered to {n.progress.delivered} of {n.progress.total}{n.progress.failed > 0 && `, ${n.progress.failed} did not answer`}</span>}
+                      {n.status === "done" && <span className="pill"><i className="dot" style={{ background: "var(--c-confirmed)" }} />Delivered to {n.progress.delivered} of {n.progress.total}</span>}
+                      {n.status === "done" && n.progress.failed > 0 && <div className="cell-sub">{n.progress.failed} did not answer</div>}
                       {n.status === "cancelled" && <span className="pill muted"><i className="dot" />Cancelled</span>}
-                      {n.note && <div className="cell-sub">{n.note}{" "}
-                        <a href={`${window.location.protocol}//${window.location.hostname}:8000/phone`} target="_blank" rel="noreferrer">Open the phone page</a>
-                        {" "}(use the same address you use for calls: a tunnel link if the phone is not this computer).</div>}
+                      {n.note && (n.status === "scheduled" || n.status === "sending") && <div className="cell-sub">Waiting for the phone.{" "}
+                        <a href={`${window.location.protocol}//${window.location.hostname}:8000/phone`} target="_blank" rel="noreferrer">Open the phone page</a></div>}
                     </td>
                     <td className="num">{(n.status === "scheduled" || n.status === "sending") && <button className="btn sm ghost" onClick={() => void cancelNotice(n.id)}>Cancel</button>}</td>
                   </tr>

@@ -87,7 +87,7 @@ def instructions(c: dict, r: dict, ivr_done: str = "", on_end_tool: bool = True)
         "", VOICE_RULE,
     ]
     if on_end_tool:
-        parts += ["", endcall.INSTRUCTION]
+        parts += ["", endcall.NOTICE_INSTRUCTION if c.get("_notice") else endcall.INSTRUCTION]
     written = [(k, s.get(k)) for k in ("greeting", "message", "doubts", "goodbye") if s.get(k)]  # not "menu": that is keys
     if written:
         parts += ["", f"The approved script in {lang}. Say it in your own natural words, keeping the facts exactly:"]

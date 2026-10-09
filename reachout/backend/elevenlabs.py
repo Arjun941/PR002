@@ -196,8 +196,8 @@ async def bridge(recv: Callable[[], Awaitable[dict | None]], send_audio: Callabl
                     call = m["client_tool_call"]
                     params = call.get("parameters", {})
                     if call.get("tool_name") == "end_call" and on_end:
-                        on_end()
-                        ok = True
+                        on_end()  # no result: answering it would make the agent say "the call has ended"
+                        continue
                     elif call.get("tool_name") == "record_answer" and on_answer:
                         ok = on_answer(str(params.get("question_id", "")), str(params.get("option_number", "")))
                     else:

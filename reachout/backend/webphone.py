@@ -43,6 +43,7 @@ PAGE = Path(__file__).with_name("static") / "phone.html"
 RING_SECONDS = int(os.getenv("WEBPHONE_RING_SECONDS", "30"))
 MAX_SECONDS = int(os.getenv("WEBPHONE_MAX_SECONDS", "300"))  # cost cap per call
 OUTCOMES = ("confirmed", "declined", "rescheduled")
+NOTICE_IDLE = float(os.getenv("NOTICE_IDLE_SECONDS", "8"))  # a reminder ends this long after the agent finishes, if the person has nothing to say
 GATE_RMS = int(os.getenv("WEBPHONE_GATE_RMS", "450"))      # quietest level (16-bit RMS) that counts as speech
 GATE_HANG = float(os.getenv("WEBPHONE_GATE_HANG", "0.35"))  # keep the gate open this long after speech
 
@@ -133,13 +134,15 @@ class Gate:
     room's noise level and is higher while the agent is talking (echo), so only clear speech interrupts it."""
 
     def __init__(self):
-        self.floor, self.open_until = 100.0, 0.0
+        self.floor, self.open_until, self.last_voice = 100.0, 0.0, 0.0  # last_voice: the last time someone spoke over silence
 
     def __call__(self, pcm: bytes, agent_talking: bool) -> bytes:
         now, level = time.monotonic(), _rms(pcm)
         bar = max(GATE_RMS, self.floor * 3) * (2.2 if agent_talking else 1.0)
         if level >= bar:
             self.open_until = now + GATE_HANG
+            if not agent_talking:
+                self.last_voice = now
         elif now > self.open_until:
             self.floor = 0.97 * self.floor + 0.03 * min(level, 1500)
         return pcm if now <= self.open_until else bytes(len(pcm))
@@ -269,6 +272,7 @@ async def _converse(c: dict, r: dict, phone: Phone, sid: str, provider: str, pic
     spoke = False
     held: list[bytes] = []
     t_ring = time.monotonic()
+    answered_logged: list[int] = []
     talk_until = 0.0  # when the agent's audio sent so far finishes playing (monotonic seconds)
     qmap = {q["id"]: q for q in c.get("questions") or []}
 
@@ -280,8 +284,10 @@ async def _converse(c: dict, r: dict, phone: Phone, sid: str, provider: str, pic
 
     async def recv() -> dict | None:
         await picked_up.wait()  # nothing from the caller until they answer
-        log.info("answered %.1f s after ringing; agent opening was %s", time.monotonic() - t_ring,
-                 f"ready ({len(held)} chunks held)" if held else "not ready yet")
+        if not answered_logged:
+            answered_logged.append(1)
+            log.info("answered %.1f s after ringing; agent opening was %s", time.monotonic() - t_ring,
+                     f"ready ({len(held)} chunks held)" if held else "not ready yet")
         while held:
             await deliver(held.pop(0))
         while True:
@@ -317,9 +323,30 @@ async def _converse(c: dict, r: dict, phone: Phone, sid: str, provider: str, pic
         return bool(q) and option.isdigit() and 0 < int(option) <= len(q["options"]) and store.add_answer(sid, qid, option)
 
     ended = asyncio.Event()  # the agent called end_call (only when asked to, or when the whole conversation is done)
+
+    async def end_when_done() -> None:
+        """Reminders and updates (notices.py) only pass on a message: once the agent has spoken and the person has nothing more to say
+        (no speech for NOTICE_IDLE seconds after the agent's last word) the call ends, the same graceful way as when the agent calls
+        end_call: the goodbye finishes playing first."""
+        armed = False
+        while True:
+            await asyncio.sleep(0.5)
+            if not spoke:
+                continue
+            if not armed:
+                armed = True
+                log.info("reminder call: the agent is speaking; it ends %.0f s after the agent stops if the person is quiet", NOTICE_IDLE)
+            # Speech right after the agent's audio is its own echo from the phone's speaker, not the person.
+            voice = gate.last_voice if gate.last_voice > talk_until + 1.0 else 0.0
+            if time.monotonic() > max(talk_until, voice) + NOTICE_IDLE:
+                log.info("reminder call done: nothing more to say, ending it")
+                ended.set()
+                return
+
+    watch = asyncio.create_task(end_when_done()) if c.get("_notice") else None
     try:
         await asyncio.wait_for(endcall.run(catalog.engine(provider)(
-            recv, send_audio, clear, {"language": LANGUAGES.get(r["language"], r["language"])}, r["language"], on_outcome,
+            recv, endcall.AfterEnd(send_audio, ended), clear, {"language": LANGUAGES.get(r["language"], r["language"])}, r["language"], on_outcome,
             instructions=callctx.instructions(c, r), opening=callctx.opening(c, r), questions=list(qmap.values()),
             on_answer=on_answer, on_end=ended.set), ended, lambda: time.monotonic() >= talk_until + 0.8), MAX_SECONDS + RING_SECONDS)
     except asyncio.TimeoutError:
@@ -330,4 +357,7 @@ async def _converse(c: dict, r: dict, phone: Phone, sid: str, provider: str, pic
             await phone.send({"type": "error", "text": f"{catalog.label(provider)} could not run this call ({type(exc).__name__})."})
         except Exception:
             pass
+    finally:
+        if watch:
+            watch.cancel()
     return spoke

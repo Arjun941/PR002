@@ -150,15 +150,16 @@ async def bridge(recv: Callable[[], Awaitable[dict | None]], send_audio: Callabl
                         for fc in m.tool_call.function_calls:
                             a = fc.args or {}
                             if fc.name == "end_call" and on_end:
-                                on_end()
-                                ok = True
+                                on_end()  # no tool response: answering it would make the model say "the call has ended"
+                                continue
                             elif fc.name == "record_answer" and on_answer:
                                 ok = on_answer(str(a.get("question_id", "")), str(a.get("option_number", "")))
                             else:
                                 ok = fc.name == "record_outcome" and on_outcome(str(a.get("outcome", "")))
                             responses.append(types.FunctionResponse(
                                 id=fc.id, name=fc.name, response={"result": "saved" if ok else "unknown tool or outcome"}))
-                        await session.send_tool_response(function_responses=responses)
+                        if responses:
+                            await session.send_tool_response(function_responses=responses)
                     sc = m.server_content
                     if not sc:
                         continue

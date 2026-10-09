@@ -2,13 +2,14 @@
 
 The organiser opens the campaign's "Remind / update" chat, an assistant writes the message (or they type their own), it is
 translated into the campaign's languages, they pick who gets it by outcome (confirmed, declined, voicemail ...) and send it now or
-at a set time. Delivery is a phone call through the same web phone as the campaign's own calls: the live agent says the message,
-answers questions about it from the event facts, then ends the call. One call at a time; someone who does not answer is tried once
+at a set time. Delivery is a phone call through the same web phone as the campaign's own calls, one way: the message is spoken
+(ElevenLabs voice, made while the phone rings), then the call ends. No agent, no questions, no replies. (If ElevenLabs is not set up
+it falls back to the live agent, which says the message and answers questions.) One call at a time; someone who does not answer is tried once
 more after NOTICE_GAP_MINUTES. These calls never change a recipient's campaign outcome or answers, show up in History (tagged as a
 reminder or update) and are recorded like any other call.
 
 The audience is decided when the notice is due, not when it is written, so a scheduled reminder reaches whoever has "confirmed" by then.
-The conversation reuses webphone._converse (the engine glue shared with the campaign's own live calls).
+The fallback conversation reuses webphone._converse (the engine glue shared with the campaign's own live calls).
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from . import catalog, llm, store, webphone
+from . import audio, catalog, llm, store, webphone
 from .dbcommon import LANGUAGES, missing_questions, now_iso
 
 log = logging.getLogger("reachout.notices")
@@ -37,6 +38,8 @@ LABELS = {"confirmed": "Confirmed", "declined": "Declined", "rescheduled": "Want
 WAITING = "Waiting for the phone: open /phone on a device and keep it open."
 Kind = Literal["reminder", "update"]
 _busy = False  # one notice call at a time
+_tried: set[str] = set()  # notices whose recordings were retried once
+_prep: dict[str, asyncio.Task] = {}  # notice id -> the task recording its messages before anyone is called
 
 
 # ---------------- who gets it ----------------
@@ -88,8 +91,11 @@ def _draft_prompt(c: dict, body: DraftIn, langs: list[str]) -> list[dict]:
 
 Write the message in each of these languages, natively in its own script, as simple, polite spoken text: {names}.
 Rules:
-- Under 60 words each. It is read out by a voice agent, so no lists and no symbols.
+- Under 75 words each. It is read out by a voice, so no lists and no symbols.
 - Start with "Hello {{name}}, this is {e.get('org') or 'us'}." using the placeholder {{name}} exactly once and no other placeholders.
+- End smoothly, never abruptly: the last sentence or two thank the person warmly for their time (and for being part of this), and give a
+  sincere good wish that fits the message, e.g. looking forward to seeing them, wishing them a good day, or asking them to take care. Keep it
+  natural in the language, not stiff, and do not add any fact for it.
 - Never tell the person to press a key. Never invent a date, time, venue, price or promise: use only the facts above and what the organiser says.
 - Keep dates, times, venues and names exactly as given. Write numbers and dates the way a person would say them.
 Reply with JSON only, in exactly this shape: {json_dumps(shape)}"""
@@ -99,13 +105,14 @@ Reply with JSON only, in exactly this shape: {json_dumps(shape)}"""
                 f"Translate it faithfully into every language listed (the original stays as it is for {src}). Translate EVERY word, "
                 "including the greeting, into the language's own script: leave in English only the placeholder {name}, names of people and "
                 "places, and numbers. Do not add or drop information. If the original has no greeting, add one from the rules, in the "
-                "target language. \"reply\" says what you did.")
+                "target language. "
+                "Keep the organiser's own closing as it is: do not add one. \"reply\" says what you did.")
         return [{"role": "system", "content": system}, {"role": "user", "content": rules + "\n\n" + task}]
     what = ("Write a REMINDER: remind the person about the event with its date, time and venue, warmly and briefly." if body.kind == "reminder"
             else "Write an UPDATE: tell the person what has CHANGED about the event, using ONLY what the organiser says changed, and say what "
                  "stays the same only if the facts above show it. If the organiser has not yet said what changed, set \"texts\" to {} and ask "
                  "in \"reply\" what changed.")
-    task = what + " After the message, the agent answers questions from the facts and the organiser's words only. If the organiser asks " \
+    task = what + " The message is only read out: nobody can reply, so do not ask questions or invite a reply. If the organiser asks " \
                   "you to change the draft, rewrite it fully with the change applied."
     turns = [{"role": t.role, "content": t.content} for t in body.messages] or [{"role": "user", "content": "Write it."}]
     return [{"role": "system", "content": system}, {"role": "user", "content": rules + "\n\n" + task}, *turns]
@@ -233,7 +240,49 @@ def _system_prompt(kind: str) -> str:
             f"You are calling only to pass on a {kind} about {{title}}: you are not collecting a decision or any answers. "
             "Say the message in your own natural words, keeping every fact exactly, then ask if they have any questions. Answer only from "
             "the facts you were given and what the message says; if you do not know, say someone from the organisation will follow up. "
-            "Never invent dates, prices or promises. If they have no questions, thank them, say goodbye and end the call.")
+            "Never invent dates, prices or promises. If they have no questions, thank them warmly for their time, give a sincere good wish, say goodbye and end the call.")
+
+
+def _spoken(n: dict, r: dict) -> tuple[str, str]:
+    """The language and the exact words this person hears (their name filled in): also the cache key of the recording."""
+    lang = r["language"]
+    text = n["texts"].get(lang) or next(iter(n["texts"].values()))
+    return lang, text.replace("{name}", r["name"])
+
+
+async def _prepare(n: dict, voice: str) -> None:
+    """Record every target's message before the first call, so the phone rings with the audio ready and it starts the moment they
+    answer (recording takes several seconds per message). Failures are logged: that call then records on the fly."""
+    sem = asyncio.Semaphore(3)
+
+    async def one(rid: str) -> None:
+        r = store.recipient(rid)
+        if not r:
+            return
+        lang, text = _spoken(n, r)
+        if audio.load(voice, lang, text):
+            return
+        async with sem:
+            try:
+                await audio.synth_text(voice, lang, text)
+            except Exception as exc:
+                log.warning("notice %s: could not record a message (%s)", n["id"], type(exc).__name__)
+
+    await asyncio.gather(*(one(t["rid"]) for t in n["targets"]))
+    log.info("notice %s: messages recorded", n["id"])
+
+
+async def _say(phone: webphone.Phone, sid: str, synth: asyncio.Task) -> bool:
+    """Play the message once and hang up right after its last word. Only a hang-up from the person's side interrupts it."""
+    pcm = await synth
+    line = webphone.PhoneLine(phone, sid)
+    await line.play(pcm)
+    while line.left() > 0:  # nothing the person says is used: only listen for them putting the phone down
+        msg = await line.recv(timeout=min(0.5, line.left()))
+        if msg is None or msg.get("event") == "stop":
+            return line.spoke
+    await asyncio.sleep(0.8)  # let the last syllable play out on the page, then the call ends
+    return True
 
 
 async def call_notice(n: dict, c: dict, r: dict, phone: webphone.Phone) -> tuple[bool, str]:
@@ -249,25 +298,36 @@ async def call_notice(n: dict, c: dict, r: dict, phone: webphone.Phone) -> tuple
     phone.state = "ringing"
     while not phone.inbox.empty():
         phone.inbox.get_nowait()
+    voice = audio.choose_voice(c)  # one-way: the message is spoken as recorded audio, no agent
+    spoken = text.replace("{name}", r["name"])
+    synth = asyncio.create_task(audio.synth_text(voice, lang, spoken)) if voice else None  # made while the phone rings
     try:
-        await phone.send({"type": "incoming", "call_id": sid, "campaign": c["name"], "recipient": r["name"], "provider": catalog.label(provider),
-                          "language": LANGUAGES.get(lang, lang), "mode": "live",
+        await phone.send({"type": "incoming", "call_id": sid, "campaign": c["name"], "recipient": r["name"],
+                          "provider": catalog.label(voice or provider), "language": LANGUAGES.get(lang, lang), "mode": "live",
                           "notice": {"id": n["id"], "kind": n["kind"], "campaign_id": c["id"], "recipient_id": r["id"]}})
         log.info("notice %s: ringing the phone for %s", n["id"], r["id"])
-        picked_up = asyncio.Event()
-        convo = asyncio.create_task(webphone._converse(nc, r, phone, sid, provider, picked_up))
-        try:
+        if synth:
             if await webphone._wait_answer(phone):
                 answered = True
                 phone.state = "in_call"
-                picked_up.set()
-                heard = await convo
-        finally:
-            if not convo.done():
-                convo.cancel()
+                heard = await _say(phone, sid, synth)
+        else:  # no voice set up: the live agent says it (and can answer questions)
+            picked_up = asyncio.Event()
+            convo = asyncio.create_task(webphone._converse(nc, r, phone, sid, provider, picked_up))
+            try:
+                if await webphone._wait_answer(phone):
+                    answered = True
+                    phone.state = "in_call"
+                    picked_up.set()
+                    heard = await convo
+            finally:
+                if not convo.done():
+                    convo.cancel()
     except Exception:
         log.exception("notice call failed")
     finally:
+        if synth and not synth.done():
+            synth.cancel()
         phone.state = "idle"
         if phone in webphone._phones:
             try:
@@ -335,6 +395,17 @@ def _advance(n: dict) -> None:
         due["next_at"] = (now + timedelta(seconds=45)).isoformat(timespec="seconds")
         store.save_notice(n)
         return
+    voice = audio.choose_voice(c)
+    if voice:  # ring only once this person's message is recorded, so it starts the moment they answer
+        lang, text = _spoken(n, r)
+        if not audio.load(voice, lang, text):
+            task = _prep.get(n["id"])
+            if task is None or task.done() and not audio.load(voice, lang, text) and n["id"] not in _tried:
+                _tried.add(n["id"])  # (after a restart, or a message that failed once) record now; a second failure rings anyway
+                _prep[n["id"]] = asyncio.create_task(_prepare(n, voice))
+                return
+            if not task.done():
+                return
     phone = webphone.idle_phone()
     if not phone:
         if n.get("note") != WAITING:
@@ -366,6 +437,9 @@ async def _tick() -> None:
             n["status"] = "sending"
             log.info("notice %s: sending to %d people", n["id"], len(who))
             store.save_notice(n)
+            voice = audio.choose_voice(c)
+            if voice and who:
+                _prep[n["id"]] = asyncio.create_task(_prepare(n, voice))
         _advance(n)
 
 

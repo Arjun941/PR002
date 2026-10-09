@@ -557,3 +557,13 @@ tr.clickable.on td { background: var(--accent-soft); }
 .aud-item:hover { background: var(--panel-2); }
 .aud-item.off { opacity: .45; cursor: not-allowed; }
 .aud-item .n { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* reminders and updates table on the campaign page */
+.notice-table { table-layout: fixed; min-width: 880px; }
+.notice-table td { vertical-align: top; white-space: normal; }
+.notice-table .nowrap { white-space: nowrap; }
+.notice-msg p { margin: 0 0 6px; line-height: 1.5; overflow-wrap: anywhere; }
+.notice-msg p b { color: var(--text); font-weight: 500; margin-right: 4px; }
+.notice-msg .clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.notice-table .cell-sub { margin-top: 6px; font-size: 12px; color: var(--muted); }
