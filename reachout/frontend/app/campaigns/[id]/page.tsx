@@ -289,7 +289,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           <>
             <div className="table-wrap">
               <table className="table">
-                <thead><tr><th>Name</th><th>Phone</th><th>Language</th><th>Segment</th><th>Outcome</th><th>Replied by</th><th className="num">Attempts</th>{d.questions.length > 0 && <th>Answers</th>}<th><span className="sr-only">Recording</span></th></tr></thead>
+                <thead><tr><th>Name</th><th>Phone</th><th>Language</th><th>Segment</th><th>Outcome</th><th>Replied by</th><th className="num">Attempts</th><th><span className="sr-only">Recording</span></th></tr></thead>
                 <tbody>
                   {shown.map(r => (
                     <Fragment key={r.id}>
@@ -297,26 +297,27 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                       <td>{r.name}</td><td className="mono muted">{r.phone}</td><td>{r.language}</td>
                       <td className="muted">{r.segment}</td><td><OutcomePill r={r} /></td>
                       <td className="muted">{r.channel ? CHANNEL[r.channel] : "–"}</td><td className="num">{r.attempts}</td>
-                      {d.questions.length > 0 && <td className="muted" title={d.questions.filter(q => r.answers[q.id]).map(q => `${q.label}: ${r.answers[q.id]}`).join(", ")}>
-                        {d.questions.map(q => r.answers[q.id]).filter(Boolean).join(" · ") || "–"}</td>}
                       <td className="num">{r.has_recording && (
                         <button className="btn sm ghost" onClick={() => void play(r)} aria-label={`Play recording for ${r.name}`}>
                           <Icon name="play" size={12} />Play
                         </button>
-                      )}{r.last_call && (
+                      )}{(r.last_call || d.questions.some(q => r.answers[q.id])) && (
                         <button className="btn sm ghost" aria-expanded={expanded === r.id} onClick={() => setExpanded(x => x === r.id ? null : r.id)}>
-                          {expanded === r.id ? "Hide" : `Details${r.last_call.qa.length ? ` (${r.last_call.qa.length})` : ""}`}
+                          {expanded === r.id ? "Hide" : `Details${r.last_call?.qa.length ? ` (${r.last_call.qa.length})` : ""}`}
                         </button>
                       )}</td>
                     </tr>
-                    {expanded === r.id && r.last_call && (
+                    {expanded === r.id && (
                       <tr className="recipient-detail">
-                        <td colSpan={8 + (d.questions.length > 0 ? 1 : 0)}>
-                          {r.last_call.summary && <p>{r.last_call.summary}</p>}
-                          {r.last_call.qa.length ? (
+                        <td colSpan={8}>
+                          {d.questions.some(q => r.answers[q.id]) && (
+                            <dl className="facts">{d.questions.filter(q => r.answers[q.id]).map(q => <div key={q.id}><dt>{q.label}</dt><dd>{r.answers[q.id]}</dd></div>)}</dl>
+                          )}
+                          {r.last_call?.summary && <p style={{ marginTop: 8 }}>{r.last_call.summary}</p>}
+                          {r.last_call?.qa.length ? (
                             <dl className="facts">{r.last_call.qa.map((q, i) => <div key={i}><dt>{q.question}</dt><dd>{q.answer || "No answer"}</dd></div>)}</dl>
-                          ) : <p className="muted">{r.last_call.analysis === "pending" ? "Working out what was said…" : "No questions and answers kept for this call."}</p>}
-                          <p style={{ marginTop: 8 }}><Link href={`/history?call=${encodeURIComponent(r.last_call.call_id)}`}>Full call details in History</Link></p>
+                          ) : r.last_call && <p className="muted">{r.last_call.analysis === "pending" ? "Working out what was said…" : "No other questions and answers kept for this call."}</p>}
+                          {r.last_call && <p style={{ marginTop: 8 }}><Link href={`/history?call=${encodeURIComponent(r.last_call.call_id)}`}>Full call details in History</Link></p>}
                         </td>
                       </tr>
                     )}

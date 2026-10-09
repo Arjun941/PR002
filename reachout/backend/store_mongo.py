@@ -251,6 +251,11 @@ class MongoStore:
         return self.recipients_c.update_one({"call_sid": call_sid, "in_flight": 1},
                                             {"$set": {f"answers.{question_id}": digit}}).matched_count > 0
 
+    def set_answer(self, rid: str, question_id: str, digit: str) -> None:
+        """Sets one recipient's saved answer to a question (used to correct what the agent saved)."""
+        if _QID.fullmatch(question_id):
+            self.recipients_c.update_one({"_id": rid}, {"$set": {f"answers.{question_id}": digit}})
+
     def save_result(self, r: dict, outcome: str) -> None:
         """Simulated call result: store the recipient's new state and log the call."""
         got = json.loads(r["answers"]) if isinstance(r.get("answers"), str) else (r.get("answers") or {})

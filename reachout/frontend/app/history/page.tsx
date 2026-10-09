@@ -70,6 +70,11 @@ function Detail({ id, onClose }: { id: string; onClose: () => void }) {
         <h3>What was asked and answered</h3>
         {c.analysis.status === "done" ? (
           <>
+            {!!c.answers_corrected?.length && (
+              <div className="stack-gap"><Notice kind="info">
+                Corrected from what the person said: {c.answers_corrected.map(x => `${x.question}: the agent saved “${x.saved ?? "nothing"}”, the person said “${x.heard}”`).join("; ")}.
+              </Notice></div>
+            )}
             {c.summary && <p>{c.summary}</p>}
             {c.qa?.length ? (
               <table className="table qa-table">

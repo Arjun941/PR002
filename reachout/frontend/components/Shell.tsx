@@ -32,9 +32,6 @@ const NAV: { href: string; label: string; icon: IconName }[] = [
   { href: "/history", label: "History", icon: "clock" },
   { href: "/providers", label: "Providers", icon: "cpu" },
 ];
-const SOON: { label: string; icon: IconName }[] = [
-  { label: "Contacts", icon: "users" }, { label: "Privacy", icon: "shield" },
-];
 
 function ModalView({ spec, onClose }: { spec: ModalSpec; onClose: () => void }) {
   const [open, setOpen] = useState(false);
@@ -118,11 +115,6 @@ export function Shell({ children }: { children: ReactNode }) {
               <Link key={n.href} href={n.href} className={pathname.startsWith(n.href) ? "active" : undefined}>
                 <Icon name={n.icon} />{n.label}
               </Link>
-            ))}
-            {SOON.map(n => (
-              <span key={n.label} className="nav-item disabled" aria-disabled="true">
-                <Icon name={n.icon} />{n.label}<em className="soon">Soon</em>
-              </span>
             ))}
           </nav>
           <div className="side-foot">

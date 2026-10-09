@@ -18,8 +18,8 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from . import assistant, audio, demo, dialer, store, stt
-from . import catalog, chatgpt, recstore
-from .builder import DEMO, MAX_PROMPT, Retry, Script, handling, router as builder_router
+from . import catalog, chatgpt, llm, recstore
+from .builder import DEMO, MAX_PROMPT, Question, Retry, Script, handling, router as builder_router
 from .costs import RETRY_ESTIMATE_PER_CALL, recipient_cost
 from .providers import router as providers_router
 from .history import latest_by_recipient, router as history_router
@@ -201,6 +201,7 @@ class CampaignEdit(BaseModel):
     system_prompt: str | None = Field(None, min_length=1, max_length=MAX_PROMPT)
     retry: Retry | None = None
     scripts: dict[str, Script] | None = None
+    questions: list[Question] | None = None  # every question the campaign should have: the existing ones unchanged, plus new ones
 
 
 @app.patch("/api/campaigns/{cid}")
@@ -224,15 +225,31 @@ def edit_campaign(cid: str, body: CampaignEdit):
                                      f"(set {', '.join(catalog.missing(body.provider, 'live'))})")
         changes |= {"provider": body.provider, "agent_provider": body.provider,
                     "handling": handling(body.provider, c["mode"], c["voice"] or body.provider)}
-    if body.scripts is not None:
-        if set(body.scripts) != set(c["scripts"]):
+    questions = c["questions"]
+    if body.questions is not None:
+        have = {q["id"]: q for q in c["questions"]}
+        sent = {q.id: q.model_dump() for q in body.questions}
+        if len(sent) != len(body.questions):
+            raise HTTPException(400, "Two questions have the same id")
+        for qid, old in have.items():  # existing questions already have answers saved against their options: keep them as they are
+            if sent.get(qid) != {k: old.get(k) for k in ("id", "label", "options", "only_if_confirmed")}:
+                raise HTTPException(400, f"Question “{old['label']}” cannot be changed or removed; add new questions instead")
+        questions = [q.model_dump() for q in body.questions]
+        if len(questions) > llm.MAX_QUESTIONS:
+            raise HTTPException(400, f"At most {llm.MAX_QUESTIONS} follow-up questions")
+        if questions != c["questions"]:
+            changes["questions"] = questions
+    if body.scripts is not None or "questions" in changes:
+        scripts_in = body.scripts if body.scripts is not None else {l: Script(**{k: s[k] for k in Script.model_fields if k in s}) for l, s in c["scripts"].items()}
+        if set(scripts_in) != set(c["scripts"]):
             raise HTTPException(400, "Scripts must cover exactly this campaign's languages")
         new = {}
-        for lang, sc in body.scripts.items():
+        ids = {q["id"] for q in questions}
+        for lang, sc in scripts_in.items():
             old = c["scripts"][lang]
             merged = old | sc.model_dump(exclude={"questions"})
-            texts = old.get("questions", {}) | {k: v for k, v in sc.questions.items() if k in old.get("questions", {})}
-            if any(not texts.get(q["id"], "").strip() for q in c["questions"]):
+            texts = {k: v for k, v in (old.get("questions", {}) | sc.questions).items() if k in ids}
+            if any(not texts.get(q["id"], "").strip() for q in questions):
                 raise HTTPException(400, f"Every follow-up question needs its spoken text ({LANGUAGES.get(lang, lang)})")
             if c["escalation"] and not merged.get("doubts", "").strip():
                 raise HTTPException(400, f"The closing question is empty ({LANGUAGES.get(lang, lang)})")

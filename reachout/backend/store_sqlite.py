@@ -302,6 +302,14 @@ class SqliteStore:
                        (json.dumps(answers(dict(row)) | {question_id: digit}), row["id"]))
         return True
 
+    def set_answer(self, rid: str, question_id: str, digit: str) -> None:
+        """Sets one recipient's saved answer to a question (used to correct what the agent saved)."""
+        with self._tx() as db:
+            row = db.execute("SELECT answers FROM recipients WHERE id = ?", (rid,)).fetchone()
+            if row:
+                db.execute("UPDATE recipients SET answers = ? WHERE id = ?",
+                           (json.dumps(answers(dict(row)) | {question_id: digit}), rid))
+
     def save_result(self, r: dict, outcome: str) -> None:
         """Simulated call result: store the recipient's new state and log the call."""
         with self._tx() as db:

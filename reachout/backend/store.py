@@ -59,6 +59,7 @@ restore_recipient = _s.restore_recipient
 finish_call = _s.finish_call
 mark_outcome = _s.mark_outcome
 add_answer = _s.add_answer
+set_answer = _s.set_answer
 save_result = _s.save_result
 log_access = _s.log_access
 

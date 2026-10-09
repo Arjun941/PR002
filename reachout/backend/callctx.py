@@ -7,6 +7,10 @@ from __future__ import annotations
 from .store import LANGUAGES
 
 PLACEHOLDERS = ("name", "language", "org", "title", "date", "time", "venue")
+# The agent talks; the keypad menu belongs to the automated (IVR) call only.
+VOICE_RULE = ("This is a spoken phone call. NEVER tell the person to press a key or a number, never read out option numbers, and "
+              "never mention a keypad or menu. Ask everything in plain words, listen to their answer in their own words (any phrasing, "
+              "in their language), and work out which option they mean. If it is not clear, ask one short question to clarify.")
 
 
 def event_facts(e: dict) -> str:
@@ -68,8 +72,9 @@ def instructions(c: dict, r: dict, ivr_done: str = "") -> str:
         f"You are speaking with {r.get('name', 'the recipient')} (language: {lang}"
         + (f", group: {r['segment']}" if r.get("segment") else "") + ").",
         "Facts about this call (use only these):", event_facts(e),
+        "", VOICE_RULE,
     ]
-    written = [(k, s.get(k)) for k in ("greeting", "message", "menu", "doubts", "goodbye") if s.get(k)]
+    written = [(k, s.get(k)) for k in ("greeting", "message", "doubts", "goodbye") if s.get(k)]  # not "menu": that is keys
     if written:
         parts += ["", f"The approved script in {lang}. Say it in your own natural words, keeping the facts exactly:"]
         parts += [f"- {k}: {fill(v, c, r)}" for k, v in written]
@@ -82,10 +87,13 @@ def instructions(c: dict, r: dict, ivr_done: str = "") -> str:
     parts += ["", "Record the person's decision as soon as it is clear: confirmed (will attend or pay), declined, or "
                   "rescheduled (needs another time)."]
     if qs:
-        parts += ["", "After that, ask these follow-up questions one at a time, conversationally, and record each answer:"]
+        parts += ["", "After that, ask these follow-up questions one at a time, in words, and record each answer. The "
+                      "choices are what the person can answer; say them naturally (or ask open-ended and match what they say):"]
         for q in qs:
             only = " (only if they confirmed)" if q.get("only_if_confirmed", True) else ""
-            opts = "; ".join(f"{i}) {o}" for i, o in enumerate(q["options"], 1))
-            spoken = (s.get("questions") or {}).get(q["id"], "")
-            parts.append(f"- {q['id']}: {q['label']}{only}. Options: {opts}." + (f" Written as: {fill(spoken, c, r)}" if spoken else ""))
+            parts.append(f"- {q['id']}: {q['label']}{only}. Choices: {' | '.join(q['options'])}.")
+        parts += ["", "To save an answer with record_answer, option_number is the choice's position in that question's list of choices "
+                      "(the first choice is 1). Count carefully and check it matches what the person actually said before saving:"]
+        for q in qs:
+            parts.append(f"  {q['id']}: " + ", ".join(f"{i} = {o}" for i, o in enumerate(q["options"], 1)))
     return "\n".join(parts)

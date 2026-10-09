@@ -19,6 +19,7 @@ import logging
 import os
 
 from . import store
+from .dbcommon import answers as saved_answers, public_recipient
 from .llm import _parse
 
 log = logging.getLogger("reachout.callinsight")
@@ -31,14 +32,15 @@ def enabled() -> bool:
 
 def _prompt(call: dict, c: dict | None) -> str:
     e = (c or {}).get("event") or {}
-    qs = "\n".join(f'- {q["id"]}: {q["label"]} (options: {", ".join(q["options"])})' for q in (c or {}).get("questions") or [])
+    qs = "\n".join(f'- {q["id"]}: {q["label"]} (options: {" | ".join(q["options"])})' for q in (c or {}).get("questions") or [])
     return f"""This is a recording of an automated phone call. LEFT channel: our side (an AI agent or recorded prompts)
 calling for {e.get("org") or call.get("org") or "the organisation"}. RIGHT channel: the person who was called.
 The call is about: {e.get("title") or call.get("campaign_name") or "an event"}{f" on {e['date']}" if e.get("date") else ""}.
-{"Keypad questions the call may have asked:" + chr(10) + qs if qs else ""}
+{"Multiple-choice questions the call may have asked (fill `choices` for each of these ids, based on what the person said):" + chr(10) + qs if qs else ""}
 
 Return JSON only, in exactly this shape:
-{{"summary": "2-3 sentences: what the call was about and what the person said",
+{{"choices": {{"<question id>": "the exact text of the listed option the person's spoken answer matches, copied from the list; '' if they did not answer or none fits"}},
+  "summary": "2-3 sentences: what the call was about and what the person said",
   "final": "confirmed | declined | rescheduled | unclear (the person's answer to the main question)",
   "qa": [{{"question": "a question or request our side made, in English", "answer": "what the person replied, in English; '' if they did not answer"}}],
   "transcript": [{{"speaker": "agent | person", "text": "what was said, in the language it was said"}}]}}
@@ -67,7 +69,30 @@ def _clean(raw: dict) -> dict:
              for x in (raw.get("transcript") if isinstance(raw.get("transcript"), list) else [])[:300]
              if isinstance(x, dict) and x.get("text")]
     final = raw.get("final") if raw.get("final") in FINALS else "unclear"
-    return {"summary": text(raw.get("summary"), 1200), "qa": qa, "transcript": turns, "final_heard": final}
+    choices = raw.get("choices") if isinstance(raw.get("choices"), dict) else {}
+    return {"summary": text(raw.get("summary"), 1200), "qa": qa, "transcript": turns, "final_heard": final,
+            "choices": {str(k): text(v, 80) for k, v in choices.items()}}
+
+
+def _reconcile(call: dict, c: dict | None, choices: dict[str, str]) -> list[dict]:
+    """A live agent saves an answer by counting options, and can count wrong ("non-vegetarian" saved as option 3).
+    What the person actually said, heard in the recording, wins: fix the saved answer and say what was changed.
+    Only live calls: on a keypad call the key the person pressed is the answer."""
+    rid = call.get("recipient_id")
+    if not c or not rid or call.get("mode") != "live":
+        return []
+    fixed = []
+    for q in c.get("questions") or []:
+        said = (choices.get(q["id"]) or "").strip().lower()
+        match = next((i for i, o in enumerate(q["options"], 1) if o.strip().lower() == said), None) if said else None
+        r = store.recipient(rid)
+        have = saved_answers(r).get(q["id"]) if r else None
+        if match and r and have != str(match):
+            store.set_answer(rid, q["id"], str(match))
+            was = q["options"][int(have) - 1] if have and have.isdigit() and 0 < int(have) <= len(q["options"]) else None
+            fixed.append({"question": q["label"], "saved": was, "heard": q["options"][match - 1]})
+            log.info("call %s: %s corrected to what was said", call["id"], q["id"])
+    return fixed
 
 
 async def analyse(call_id: str, stereo_wav: bytes) -> None:
@@ -83,7 +108,12 @@ async def analyse(call_id: str, stereo_wav: bytes) -> None:
     c = store.campaign(call["campaign_id"]) if call.get("campaign_id") else None
     try:
         raw = await asyncio.to_thread(_run, stereo_wav, _prompt(call, c))
-        call = (store.get_call(call_id) or call) | _clean(raw) | {"analysis": {"status": "done", "by": "Gemini"}}
+        found = _clean(raw)
+        fixed = _reconcile(call, c, found.pop("choices"))
+        r = store.recipient(call["recipient_id"]) if call.get("recipient_id") else None
+        call = (store.get_call(call_id) or call) | found | {"analysis": {"status": "done", "by": "Gemini"}, "answers_corrected": fixed}
+        if r:
+            call["answers"] = public_recipient(r, (c or {}).get("questions") or [])["answers"]
         log.info("call %s: %d answers kept", call_id, len(call["qa"]))
     except Exception as exc:  # network, quota, format: the call itself is already saved
         log.warning("call %s: analysis failed (%s)", call_id, type(exc).__name__)

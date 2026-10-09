@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
 import re
 import secrets
@@ -204,6 +205,46 @@ def options():
         "default_provider": catalog.default(),
         "phones": webphone.connected(),
     }
+
+
+class TranslateReq(BaseModel):
+    label: str = Field(min_length=1, max_length=60)
+    options: list[str] = Field(min_length=llm.MIN_OPTIONS, max_length=llm.MAX_OPTIONS)
+    languages: list[str] = Field(min_length=1)
+    provider: Provider | None = None
+
+
+@router.post("/builder/translate-question")
+def translate_question(body: TranslateReq):
+    """The spoken text of one keypad question in each of the campaign's languages (one model call). Languages the
+    model does not return usable text for get the English wording, and are reported so the page can say so."""
+    langs = _check_langs(body.languages)
+    q = {"label": body.label.strip(), "options": [o.strip() for o in body.options if o.strip()]}
+    english = llm.question_text(q)
+    todo = [l for l in langs if l != "en"]
+    texts, why = {"en": english} if "en" in langs else {}, []
+    if todo:
+        shape = {l: "..." for l in todo}
+        msgs = [
+            {"role": "system", "content": "You translate short phone-call prompts for an automated keypad menu used by Indian schools, "
+                                          "clinics and event organisers. Reply with JSON only."},
+            {"role": "user", "content": f"""English prompt: {english}
+
+Translate it into each of these languages, written natively in its own script, as simple, polite spoken text:
+{", ".join(f"{LANGUAGES[l]} ({l})" for l in todo)}.
+Keep the structure: first the question, then which key to press for each option, in the same order. Write the key
+numbers as digits. Translate the option names too, but keep names of people, places and brands as they are.
+
+Reply with JSON only, in exactly this shape: {json.dumps(shape, ensure_ascii=False)}"""}]
+        raw, used, why = llm.run_json(msgs, body.provider or catalog.default())
+        for l in todo:
+            t = raw.get(l)
+            if isinstance(t, str) and t.strip():
+                texts[l] = t.strip()[:400]
+    missing = [l for l in langs if l not in texts]
+    for l in missing:
+        texts[l] = english
+    return {"texts": texts, "english_for": missing, "warnings": why if missing else []}
 
 
 @router.post("/builder/draft")

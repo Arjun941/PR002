@@ -32,6 +32,7 @@ export interface CallRecord {
   recording: { saved: boolean; note: string; seconds: number };
   analysis: { status: "pending" | "done" | "failed" | "off" | "none"; note?: string; by?: string };
   final_heard: string | null; summary: string; has_recording: boolean; qa_count?: number;
+  answers_corrected?: { question: string; saved: string | null; heard: string }[];
   qa?: QA[]; transcript?: { speaker: "agent" | "person"; text: string }[]; keys_pressed?: string[]; event_title?: string | null;
 }
 export interface RetryPolicy { max_attempts: number; gap_hours: number }
