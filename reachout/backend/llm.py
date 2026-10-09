@@ -21,7 +21,10 @@ log = logging.getLogger("reachout.llm")
 
 FIELDS = ("greeting", "message", "menu", "voicemail", "goodbye")
 # Follow-up keypad questions after the main 1/2/3 answer, chosen per event by the model.
-MAX_QUESTIONS, MIN_QUESTIONS, MIN_OPTIONS, MAX_OPTIONS = 4, 3, 2, 6
+# MAX_QUESTIONS is only a safety bound: a campaign can have as many follow-ups as it needs. When drafting, the model is
+# asked for MIN_QUESTIONS to DRAFT_QUESTIONS of them.
+MAX_QUESTIONS, MIN_QUESTIONS, MIN_OPTIONS, MAX_OPTIONS = 500, 3, 2, 6
+DRAFT_QUESTIONS = 4
 KIND_LABEL = {"seminar": "seminar or event invitation", "clinic": "clinic appointment reminder",
               "school": "school notice to parents", "payment": "payment reminder"}
 DTMF = [  # fixed by design; the model only words the prompt for it
@@ -90,9 +93,9 @@ Rules:
 - voicemail: under 30 words; say we will call again.
 - goodbye: one short sentence.{doubts}
 - questions: after the menu answer the call collects the details the organiser needs from each person, as follow-up
-  multiple-choice questions. Return {MIN_QUESTIONS} to {MAX_QUESTIONS} for EVERY event, whatever its type (not fewer than {MIN_QUESTIONS}): think
+  multiple-choice questions. Return {MIN_QUESTIONS} to {DRAFT_QUESTIONS} for EVERY event, whatever its type (not fewer than {MIN_QUESTIONS}): think
   about everything an organiser of exactly this event needs to know from each person to plan it, and ask for all of it.
-  Aim for {MAX_QUESTIONS} whenever you can think of that many useful ones. Return [] only if the call is a bare notice
+  Aim for {DRAFT_QUESTIONS} whenever you can think of that many useful ones. Return [] only if the call is a bare notice
   where nothing could be planned from the answers. Order them most important first. Typical ones by kind of event (pick and adapt, never copy blindly):
     hackathon, contest or fest: team status (I have a team / I need a team / Solo), food preference, T-shirt size, laptop or equipment
     workshop or training: skill level, laptop or materials, preferred batch or time slot, dietary needs
@@ -245,11 +248,11 @@ def draft(e: dict, langs: list[str], provider: str, escalation: bool) -> tuple[d
 
 
 def _questions(raw) -> tuple[list[dict], dict[str, dict]]:
-    """Untrusted model output -> at most MAX_QUESTIONS clean questions with ids q1..qN.
+    """Untrusted model output -> at most DRAFT_QUESTIONS clean questions with ids q1..qN.
     Also returns {the model's id: question} so each language's spoken text can be matched up."""
     out, renamed = [], {}
     for q in raw if isinstance(raw, list) else []:
-        if len(out) == MAX_QUESTIONS or not isinstance(q, dict):
+        if len(out) == DRAFT_QUESTIONS or not isinstance(q, dict):
             break
         label = str(q.get("label") or "").strip()[:60]
         opts = [str(o).strip()[:40] for o in q.get("options") or [] if str(o).strip()][:MAX_OPTIONS]
@@ -267,3 +270,43 @@ def _clamp(v, lo: int, hi: int, default: int) -> int:
         return max(lo, min(hi, int(v)))
     except (TypeError, ValueError):
         return default
+
+
+def translate_scripts(source: dict, event: dict, langs: list[str], questions: list[dict], provider: str) -> tuple[dict, list[str]]:
+    """The campaign's approved script in new languages (one model call), written natively in each language's script.
+    `source` is an existing language's script (fields, closing question and the spoken text of each question). A language
+    the model does not return usable text for gets the source wording unchanged (still English or whatever it was), and is
+    named in the warnings so the person can fix it."""
+    keep = [*FIELDS, "doubts"]
+    src = {k: source.get(k, "") for k in keep if source.get(k)} | {"questions": source.get("questions") or {}}
+    shape = {l: {k: "..." for k in src if k != "questions"} | {"questions": {q["id"]: "..." for q in questions}} for l in langs}
+    msgs = [
+        {"role": "system", "content": "You translate phone-call scripts for an automated calling system used by Indian schools, "
+                                      "clinics and event organisers. Reply with JSON only."},
+        {"role": "user", "content": f"""The approved script for this call, in the language it is already written in:
+{json.dumps(src, ensure_ascii=False)}
+
+Facts about the call (for context only): {json.dumps({k: v for k, v in event.items() if v}, ensure_ascii=False)}
+
+Translate it into each of these languages, written natively in its own script, as simple, polite spoken text:
+{", ".join(f"{LANGUAGES[l]} ({l})" for l in langs)}.
+Keep the meaning and every fact (dates, times, venues, amounts, names) exactly. Keep the placeholder {{name}} in the greeting
+exactly once, and add no other placeholders. For the keypad menu and the questions keep the structure: the question, then which
+key to press for each option, in the same order, with the key numbers as digits.
+
+Reply with JSON only, in exactly this shape: {json.dumps(shape, ensure_ascii=False)}"""}]
+    raw, used, warnings = run_json(msgs, provider)
+    out, bad = {}, []
+    for l in langs:
+        got = raw.get(l) if isinstance(raw.get(l), dict) else {}
+        ok = all(isinstance(got.get(k), str) and got[k].strip() for k in src if k != "questions") and "{name}" in str(got.get("greeting", ""))
+        qs = got.get("questions") if isinstance(got.get("questions"), dict) else {}
+        if ok:
+            out[l] = {k: got[k].strip() for k in src if k != "questions"} | {
+                "questions": {q["id"]: (qs.get(q["id"]) or (source.get("questions") or {}).get(q["id"]) or question_text(q)).strip() for q in questions}}
+        else:
+            bad.append(LANGUAGES[l])
+            out[l] = {k: v for k, v in src.items() if k != "questions"} | {"questions": dict(source.get("questions") or {})}
+    if bad:
+        warnings.append(f"No usable translation for {', '.join(bad)}: the original wording was copied there. Edit it before launch.")
+    return out, warnings

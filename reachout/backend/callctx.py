@@ -111,7 +111,7 @@ def instructions(c: dict, r: dict, ivr_done: str = "", on_end_tool: bool = True)
                       "(the first choice is 1). Count carefully and check it matches what the person actually said before saving:"]
         for q in todo:
             parts.append(f"  {q['id']}: " + ", ".join(f"{i} = {o}" for i, o in enumerate(q["options"], 1)))
-        done = [q for q in qs if q["id"] in said]
+        done = [q for q in qs if said.get(q["id"])]
         if done:
             parts += ["", "Already answered earlier (do not ask again): " + ", ".join(q["label"] for q in done) + "."]
         return "\n".join(parts)

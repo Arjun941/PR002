@@ -120,7 +120,7 @@ export function CampaignTable({ list, detailed, onDelete }: { list: Summary[]; d
       <table className="table">
         <thead><tr>
           <th>Campaign</th><th>Status</th><th>Languages</th><th className="w-outcomes">Outcomes</th>
-          <th className="num">Answer rate</th><th className="num">Cost</th>{detailed && <th className="num">Started</th>}
+          <th className="num">Answer rate</th>{detailed && <th className="num">Started</th>}
           {onDelete && <th><span className="sr-only">Actions</span></th>}
         </tr></thead>
         <tbody>
@@ -134,7 +134,6 @@ export function CampaignTable({ list, detailed, onDelete }: { list: Summary[]; d
               <td className="muted">{c.languages.join(", ")}</td>
               <td><Stack counts={c.totals.counts} total={c.totals.recipients} /></td>
               <td className="num">{fmt.pct(c.totals.answer_rate)}</td>
-              <td className="num">{fmt.inr(c.totals.cost_inr)}</td>
               {detailed && <td className="num muted">{ago(c.started_at)}</td>}
               {onDelete && (() => {
                 const calling = c.status === "running" || (c.status as string) === "preparing";

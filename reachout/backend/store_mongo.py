@@ -177,6 +177,32 @@ class MongoStore:
             self.campaigns_c.update_one({"_id": cid, "status": "completed"}, {"$set": {"status": "running"}})
         return n
 
+    # ---------- contacts of an existing campaign ----------
+
+    def add_recipients(self, recs: list[dict]) -> None:
+        if recs:
+            base = time.time_ns()
+            self.recipients_c.insert_many([
+                {k: v for k, v in r.items() if k not in ("id", "answers")} | {"_id": r["id"], "seq": base + i, "answers": {}}
+                for i, r in enumerate(recs)])
+
+    def update_recipient(self, rid: str, fields: dict) -> None:
+        """name, language and segment only (the phone number is the identity: remove and add instead)."""
+        fields = {k: v for k, v in fields.items() if k in ("name", "language", "segment")}
+        if fields:
+            self.recipients_c.update_one({"_id": rid}, {"$set": fields})
+
+    def remove_recipients(self, cid: str, ids: list[str]) -> int:
+        """Deletes these contacts of the campaign with their call log, history and recordings (a person asked to be
+        removed must not leave audio behind). Contacts on a call right now are skipped. Returns how many went."""
+        ok = [d["_id"] for d in self.recipients_c.find({"_id": {"$in": ids}, "campaign_id": cid, "in_flight": 0}, {"_id": 1})]
+        if not ok:
+            return 0
+        self.calls_c.delete_many({"recipient_id": {"$in": ok}})
+        self.audio_c.delete_many({"$or": [{"recipient_id": {"$in": ok}}, {"_id": {"$in": ok}}]})
+        self.history_c.delete_many({"recipient_id": {"$in": ok}})
+        return self.recipients_c.delete_many({"_id": {"$in": ok}}).deleted_count
+
     # ---------- voice preparation ----------
 
     def pause_preparing(self, cid: str, note: str) -> None:

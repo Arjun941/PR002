@@ -33,7 +33,7 @@ export default function OverviewPage() {
         <Stat label="Calls placed" value={s.calls_placed} kind="int" sub={`to ${fmt.int(s.contacted)} of ${fmt.int(s.recipients)} recipients`} />
         <Stat label="Answer rate" value={s.answer_rate} kind="pct" sub={`${fmt.int(s.answered)} calls answered`} />
         <Stat label="Confirmed" value={s.counts.confirmed} kind="int" sub={`${fmt.pct(s.confirm_rate)} of answered calls`} />
-        <Stat label="Estimated cost" value={s.cost_inr} kind="inr" sub={`${fmt.inr2(s.cost_inr / Math.max(s.calls_placed, 1))} per call`} />
+        <Stat label="Waiting to be called" value={s.counts.pending} kind="int" sub={`of ${fmt.int(s.recipients)} recipients`} />
       </section>
       <section className="grid-2">
         <div className="card"><div className="card-head"><h2>Calls per day</h2></div><DailyChart daily={d.daily} /></div>

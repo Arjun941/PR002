@@ -15,8 +15,6 @@ const nf = new Intl.NumberFormat("en-IN");
 export const fmt = {
   int: (v: number) => nf.format(Math.round(v)),
   pct: (v: number) => `${Math.round(v * 1000) / 10}%`,
-  inr: (v: number) => (v < 100 ? `₹${v.toFixed(1)}` : `₹${nf.format(Math.round(v))}`),
-  inr2: (v: number) => `₹${v.toFixed(2)}`,
 };
 export type FmtKind = keyof typeof fmt;
 

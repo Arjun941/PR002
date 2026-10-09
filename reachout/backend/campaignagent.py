@@ -55,10 +55,23 @@ def _rules(scope: str) -> str:
         acts = '"redraft" writes every script, the questions and the system prompt again from the event details ' \
                '(use it after changing the event, languages or mode when the existing scripts no longer fit, and say that you did)'
     else:
-        where = ("You are on the page of an existing CAMPAIGN. Its contacts and languages are fixed, and so are its existing follow-up "
-                 "questions (new ones are added on the Edit page); say so if asked to change them. You can edit its name, provider, mode, retry policy, event details, "
-                 "system prompt and scripts, but only while it is paused or finished.")
-        builder_only = ""
+        where = ("You are on the page of an existing CAMPAIGN. You can edit its name, provider, mode, retry policy, event details, "
+                 "system prompt, scripts, follow-up questions (add, change or remove), its languages and its contacts, but only "
+                 "while it is paused or finished. Saved answers are the number of the key pressed: when options change they follow "
+                 "their option's text, and any that point at a deleted option are cleared, so mention that when you remove or reword "
+                 "options that people have already answered. Adding a language translates the whole script into it automatically; "
+                 "removing a language needs every contact in it moved first (use contact_ops in the same reply). You see only counts "
+                 "of the contacts (no names or numbers); you find people by filters.")
+        builder_only = (',\n    "question_ops": [{"op": "add", "label": "short English label", "options": ["A", "B"], "only_if_confirmed": true,'
+                        '\n                      "spoken": {"<language code>": "spoken question reading out every option with its key"}},'
+                        '\n                     {"op": "update", "id": "q1", "label": "...", "options": ["full new option list"]},'
+                        '\n                     {"op": "remove", "id": "q2"}]'
+                        '   // an update lists the FULL new options; spoken text per language is optional (omit it and the server translates it)'
+                        ',\n    "languages": ["en", "hi"]   // the campaign\'s complete new language list'
+                        ',\n    "contact_ops": [{"op": "add", "csv": "name,phone,language,segment rows exactly as the user gave them"},'
+                        '\n                    {"op": "set", "where": {"language": "hi", "segment": "Class 5", "outcome": "pending", "name_contains": "Asha"}, "language": "en", "segment": "Class 6"},'
+                        '\n                    {"op": "remove", "where": {"name_contains": "Asha"}}]'
+                        '   // where needs at least one filter; set changes language and/or segment of everyone matching')
         acts = ('"pause" pauses a campaign that is running so it can be edited (only when the user asked for a change '
                 'that needs it); "resynthesize" makes the IVR audio again for a hybrid campaign')
     return f"""You are the campaign agent of Reachout, a tool for automated multilingual phone-call campaigns run by Indian
@@ -76,12 +89,12 @@ Your job: understand what the user wants, make the change yourself, and say brie
   system prompt that mention it, in every language, written natively in that language's script.
 - Never invent facts (dates, venues, prices, names, phone numbers). If you need one, ask.
 - When a request is ambiguous or risky, ask one short question instead of guessing. Answer questions about the
-  campaign (results, scripts, cost, how it works) from the state without changing anything.
+  campaign (results, scripts, how it works) from the state without changing anything.
 - Do not repeat unchanged text in "edits"; send only the fields you change. For scripts send only the fields you change.
 - You cannot add or edit contacts, launch, delete or resume campaigns, or change phone settings: say so and point to the
   right place in the UI.
 - Every change you mention in "reply" MUST be included in "edits" (or "actions"): never say you changed something you did not send.
-- Do not claim a result you cannot know. Costs and totals come only from the state.
+- Do not claim a result you cannot know. Totals and results come only from the state.
 - You can see what you changed earlier in this chat ("[applied: ...]" notes); the state reflects it.
 
 Reply with JSON only, exactly this shape:
@@ -129,30 +142,31 @@ def clean(raw: dict, scope: str, languages: list[str]) -> tuple[str, dict, list[
         got = {k: _s(ev[k], n) for k, n in EVENT_FIELDS.items() if k in ev and (k not in ("title", "kind") or _s(ev[k], n))}
         if got:
             edits["event"] = got
+    langs_in = src.get("languages")
+    if isinstance(langs_in, list):
+        ok = [l for l in dict.fromkeys(langs_in) if l in LANGUAGES]
+        if ok:
+            edits["languages"] = ok
+    allowed = set(languages) | set(edits.get("languages", []))
     sc = src.get("scripts")
     if isinstance(sc, dict):
         out = {}
         for lang, fields in sc.items():
-            if lang not in LANGUAGES or not isinstance(fields, dict) or (languages and lang not in languages):
+            if lang not in LANGUAGES or not isinstance(fields, dict) or (allowed and lang not in allowed):
                 continue
             part = {f: _s(fields[f], 800) for f in SCRIPT_FIELDS if _s(fields.get(f), 800)}
             qs = fields.get("questions")
             if isinstance(qs, dict):
-                part["questions"] = {str(k)[:4]: _s(v, 400) for k, v in qs.items() if _s(v, 400)}
+                part["questions"] = {str(k)[:8]: _s(v, 400) for k, v in qs.items() if _s(v, 400)}
             if part:
                 out[lang] = part
         if out:
             edits["scripts"] = out
     if scope == "builder":
-        langs = src.get("languages")
-        if isinstance(langs, list):
-            ok = [l for l in dict.fromkeys(langs) if l in LANGUAGES]
-            if ok:
-                edits["languages"] = ok
         qs = src.get("questions")
         if isinstance(qs, list):
             clean_q = []
-            for i, q in enumerate(qs[:4], 1):
+            for i, q in enumerate(qs[:50], 1):
                 if isinstance(q, dict) and _s(q.get("label"), 60) and isinstance(q.get("options"), list):
                     opts = [_s(o, 40) for o in q["options"] if _s(o, 40)][:6]
                     if len(opts) >= 2:
@@ -160,6 +174,55 @@ def clean(raw: dict, scope: str, languages: list[str]) -> tuple[str, dict, list[
                                         "only_if_confirmed": bool(q.get("only_if_confirmed", True))})
             if clean_q or qs == []:
                 edits["questions"] = clean_q
+    if scope == "campaign":
+        ops = src.get("question_ops")
+        if isinstance(ops, list):
+            out = []
+            for o in ops[:30]:
+                if not isinstance(o, dict) or o.get("op") not in ("add", "update", "remove"):
+                    continue
+                op = {"op": o["op"]}
+                if o["op"] != "add":
+                    op["id"] = _s(o.get("id"), 4)
+                    if not op["id"]:
+                        continue
+                if o["op"] != "remove":
+                    if _s(o.get("label"), 60):
+                        op["label"] = _s(o["label"], 60)
+                    if isinstance(o.get("options"), list):
+                        opts = [_s(x, 40) for x in o["options"] if _s(x, 40)][:6]
+                        if len(opts) >= 2:
+                            op["options"] = opts
+                    if isinstance(o.get("only_if_confirmed"), bool):
+                        op["only_if_confirmed"] = o["only_if_confirmed"]
+                    sp = o.get("spoken") if isinstance(o.get("spoken"), dict) else {}
+                    op["spoken"] = {l: _s(v, 400) for l, v in sp.items() if l in LANGUAGES and _s(v, 400)}
+                    if o["op"] == "add" and not (op.get("label") and op.get("options")):
+                        continue
+                out.append(op)
+            if out:
+                edits["question_ops"] = out
+    if scope == "campaign":
+        cops = src.get("contact_ops")
+        if isinstance(cops, list):
+            out = []
+            for o in cops[:10]:
+                if not isinstance(o, dict) or o.get("op") not in ("add", "remove", "set"):
+                    continue
+                w = o.get("where") if isinstance(o.get("where"), dict) else {}
+                where = {k: _s(w[k], 60) for k in ("language", "segment", "outcome", "name_contains") if _s(w.get(k), 60)}
+                if o["op"] == "add":
+                    if _s(o.get("csv"), 100000):
+                        out.append({"op": "add", "csv": _s(o["csv"], 100000)})
+                elif where:  # never a bulk remove or change without a filter
+                    op = {"op": o["op"], "where": where}
+                    if o["op"] == "set":
+                        op |= {k: _s(o[k], 40) for k in ("language", "segment") if _s(o.get(k), 40)}
+                        if not ({"language", "segment"} & set(op)):
+                            continue
+                    out.append(op)
+            if out:
+                edits["contact_ops"] = out
     acts = [a for a in (raw.get("actions") or []) if a in ACTIONS[scope]] if isinstance(raw.get("actions"), list) else []
     return reply, edits, list(dict.fromkeys(acts))
 

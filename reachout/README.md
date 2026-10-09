@@ -19,7 +19,7 @@ playback; the backend loads `.env` itself on startup (restart it after editing `
 ## Layout
 
 - `backend/main.py`: dashboard API (`/api/overview`, `/api/campaigns`, `/api/campaigns/{id}`, retry, pause/resume).
-- `backend/builder.py`, `llm.py`, `costs.py`: campaign builder (one drafting call per campaign, cost estimate, launch).
+- `backend/builder.py`, `llm.py`: campaign builder (one drafting call per campaign, review, launch).
 - `backend/dialer.py`: rings the phone page (`/phone`) for running campaigns; `webphone.py` runs the call.
 - `backend/recordings.py`: PIN-protected recording playback with an access log.
 - `backend/store.py`, `demo.py`: SQLite storage and the opt-in demo data.
@@ -31,6 +31,6 @@ playback; the backend loads `.env` itself on startup (restart it after editing `
 - [~] Phase 1: Exotel telephony skeleton (code in place, awaiting a real-call test)
 - [~] Phase 2: DTMF-first call flow, pre-synthesised ElevenLabs audio, voicemail handling (awaiting a real-call test)
 - [~] Phase 3: key 4 bridges to an ElevenLabs Conversational AI agent (awaiting a real-call test)
-- [x] Phase 4: agentic campaign builder with cost estimate
+- [x] Phase 4: agentic campaign builder
 - [~] Phase 5: dashboard on real data, recording access control (awaiting a real-call test)
 - [ ] Phase 6: encryption at rest, retention policy, access logs

@@ -24,7 +24,7 @@ const GREETINGS: Record<Scope, Turn> = {
   },
   campaign: {
     role: "assistant", greeting: true,
-    content: "I remember everything about this campaign and can edit it while it is paused or finished: name, provider, mode, retries, event details, system prompt and scripts. Ask me anything about it or tell me what to change.",
+    content: "I remember everything about this campaign and can edit it while it is paused or finished: name, provider, mode, retries, event details, system prompt, scripts, follow-up questions, languages and contacts. Ask me anything about it or tell me what to change.",
   },
 };
 
@@ -82,6 +82,7 @@ export function AssistantChat() {
     if (scope === "create") setChat({ key: scopeKey, turns: [GREETINGS.create] });
     else if (scope === "builder") { const t = loadChat(); setChat({ key: scopeKey, turns: t.length ? t : [GREETINGS.builder] }); }
     else {
+      setOpen(true);  // opening a campaign slides its agent panel in
       setChat({ key: scopeKey, turns: [GREETINGS.campaign] });
       api<{ messages: ChatTurn[] }>(`/campaigns/${encodeURIComponent(cid)}/chat`)
         .then(r => { if (live && r.messages.length) setChat({ key: scopeKey, turns: r.messages }); })

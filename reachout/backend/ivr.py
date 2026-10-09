@@ -106,7 +106,7 @@ async def _follow_ups(line, c: dict, outcome: str, clips: dict) -> None:
     rec = store.recipient_by_call(line.call_sid) if line.call_sid else None
     done = store.answers(rec) if rec else {}  # a call-back: skip what was answered before the earlier call was cut off
     for q in c.get("questions") or []:
-        if q["id"] in done:
+        if done.get(q["id"]):
             continue
         if (outcome == "confirmed" or not q.get("only_if_confirmed", True)) and clips["questions"].get(q["id"]):
             await _ask(line, q, clips["questions"][q["id"]])

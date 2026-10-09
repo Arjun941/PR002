@@ -52,7 +52,7 @@ def missing_questions(questions: list[dict] | None, r: dict) -> list[dict]:
     if outcome not in ANSWERED:
         return []
     got = answers(r)
-    return [q for q in questions or [] if (outcome == "confirmed" or not q.get("only_if_confirmed", True)) and q["id"] not in got]
+    return [q for q in questions or [] if (outcome == "confirmed" or not q.get("only_if_confirmed", True)) and not got.get(q["id"])]  # a cleared answer ("") is not an answer
 
 
 def public_recipient(r: dict, questions: list[dict] = ()) -> dict:

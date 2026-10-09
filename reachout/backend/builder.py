@@ -1,5 +1,5 @@
 """Campaign builder (Phase 4): event details -> one drafting call (scripts + the agent's system prompt)
--> human review -> cost estimate -> launch. A campaign picks one provider (ElevenLabs or Gemini) and a mode:
+-> human review -> launch. A campaign picks one provider (ElevenLabs or Gemini) and a mode:
   live    the agent takes over the whole call
   hybrid  pre-synthesised IVR with the keypad, then the agent for anyone with a question at the end
 Calls ring the phone page (webphone.py); the IVR audio is synthesised when the campaign is created.
@@ -18,7 +18,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import AfterValidator, BaseModel, Field, StringConstraints
 
-from . import audio, callctx, catalog, costs, llm, recstore, store, webphone
+from . import audio, callctx, catalog, llm, recstore, store, webphone
 from .store import LANGUAGES, now_iso
 
 router = APIRouter(prefix="/api")
@@ -74,7 +74,7 @@ class Script(BaseModel):
 
 class Question(BaseModel):
     """A follow-up keypad question after the main 1/2/3 answer; option n is key n."""
-    id: str = Field(pattern=r"^q[1-9]$")
+    id: str = Field(pattern=r"^q[0-9]{1,4}$")
     label: str = Field(min_length=1, max_length=60)
     options: list[str] = Field(min_length=llm.MIN_OPTIONS, max_length=llm.MAX_OPTIONS)
     only_if_confirmed: bool = True
@@ -104,12 +104,7 @@ class ContactsReq(BaseModel):
     languages: list[str] = Field(min_length=1)
 
 
-class EstimateReq(BaseModel):
-    kind: Kind
-    by_language: dict[str, int]
-    scripts: dict[str, Script]
-    retry: Retry
-    questions: list[Question] = Field(default_factory=list, max_length=llm.MAX_QUESTIONS)
+class HandlingReq(BaseModel):
     provider: Provider
     mode: Mode
 
@@ -278,14 +273,10 @@ def contacts(body: ContactsReq):
     }
 
 
-@router.post("/builder/estimate")
-def estimate(body: EstimateReq):
-    _check_langs(list(body.by_language))
-    return costs.estimate(kind=body.kind, by_language=body.by_language,
-                          scripts={l: s.model_dump() for l, s in body.scripts.items()},
-                          max_attempts=body.retry.max_attempts, questions=len(body.questions),
-                          provider=body.provider, mode=body.mode) | {
-        "handling": handling(body.provider, body.mode, audio.choose_voice({"provider": body.provider}) or body.provider)}
+@router.post("/builder/handling")
+def campaign_handling(body: HandlingReq):
+    """Where this campaign's audio and text are processed, for the review step."""
+    return {"handling": handling(body.provider, body.mode, audio.choose_voice({"provider": body.provider}) or body.provider)}
 
 
 def handling(provider: str, mode: str, voice: str = "") -> dict:
