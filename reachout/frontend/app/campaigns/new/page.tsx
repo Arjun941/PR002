@@ -26,7 +26,7 @@ const FIELD: Record<(typeof SCRIPT_FIELDS)[number], [label: string, hint: string
 const TITLE_HINT: Record<string, string> = {
   seminar: "Pune AI Summit", clinic: "your follow-up with Dr Rao", school: "the parent-teacher meeting", payment: "the Term 2 fee of ₹4,500",
 };
-const SAMPLE = "name,phone,language,segment\nAsha Kulkarni,8943198705,ml,Class 5\nRavi Menon,+91 8301920200,en,Class 6\n";
+const SAMPLE = "name,phone,language,segment\nArjun,8943198705,en,Class 5\nAbhishek,+91 8301920200,ml,Class 6\n";
 
 const OTHER = "__other__";
 const EMPTY_EVENT: EventDetails = { org: "", kind: "seminar", title: "", date: "", time: "", venue: "", details: "" };
