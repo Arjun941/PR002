@@ -147,7 +147,8 @@ async def _signed_url() -> str:
 async def bridge(recv: Callable[[], Awaitable[dict | None]], send_audio: Callable[[bytes], Awaitable[None]],
                  clear: Callable[[], Awaitable[None]], variables: dict[str, str], language: str,
                  on_outcome: Callable[[str], bool], preroll: bytes = b"", *, instructions: str = "", opening: str = "",
-                 questions: list[dict] | None = None, on_answer: Callable[[str, str], bool] | None = None) -> None:
+                 questions: list[dict] | None = None, on_answer: Callable[[str, str], bool] | None = None,
+                 on_end: Callable[[], None] | None = None) -> None:
     """Connect the caller to the agent until either side hangs up or AGENT_MAX_SECONDS pass.
     recv() yields Exotel events (None when the call ends); audio is PCM16 8 kHz both ways.
     preroll: what the caller already said before the agent was connected; it is sent first.
@@ -194,7 +195,10 @@ async def bridge(recv: Callable[[], Awaitable[dict | None]], send_audio: Callabl
                 elif t == "client_tool_call":
                     call = m["client_tool_call"]
                     params = call.get("parameters", {})
-                    if call.get("tool_name") == "record_answer" and on_answer:
+                    if call.get("tool_name") == "end_call" and on_end:
+                        on_end()
+                        ok = True
+                    elif call.get("tool_name") == "record_answer" and on_answer:
                         ok = on_answer(str(params.get("question_id", "")), str(params.get("option_number", "")))
                     else:
                         ok = call.get("tool_name") == "record_outcome" and on_outcome(str(params.get("outcome", "")))

@@ -10,6 +10,7 @@ Run from the project root:  uvicorn backend.main:app --reload
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -379,6 +380,20 @@ def campaign_agent(body: AgentReq):
         turns = turns[campaignagent.SUMMARISE_N:]
     store.update_campaign(cid, {"chat": turns, "chat_summary": summary})
     return {"reply": reply, "edits": edits, "actions": actions, "applied": applied, "errors": errors, "warnings": warnings}
+
+
+@app.post("/api/campaigns/{cid}/reset")
+def reset_campaign(cid: str, request: Request):
+    """Development tool: undo every call of a campaign that is not calling, so it can be run again from scratch. Deletes the
+    campaign's call history, answers and recordings. ALLOW_RESET=0 turns it off."""
+    if os.getenv("ALLOW_RESET", "1") == "0":
+        raise HTTPException(403, "Resetting campaigns is turned off (ALLOW_RESET=0)")
+    c = _get(cid)
+    if c["status"] in ("running", "preparing"):
+        raise HTTPException(409, "Pause the campaign before resetting it")
+    n = store.reset_campaign(cid)
+    store.log_access("campaign.reset", cid, request.client.host if request.client else None)
+    return {"reset": n}
 
 
 @app.delete("/api/campaigns/{cid}")

@@ -21,7 +21,7 @@ log = logging.getLogger("reachout.llm")
 
 FIELDS = ("greeting", "message", "menu", "voicemail", "goodbye")
 # Follow-up keypad questions after the main 1/2/3 answer, chosen per event by the model.
-MAX_QUESTIONS, MIN_OPTIONS, MAX_OPTIONS = 4, 2, 6
+MAX_QUESTIONS, MIN_QUESTIONS, MIN_OPTIONS, MAX_OPTIONS = 4, 3, 2, 6
 KIND_LABEL = {"seminar": "seminar or event invitation", "clinic": "clinic appointment reminder",
               "school": "school notice to parents", "payment": "payment reminder"}
 DTMF = [  # fixed by design; the model only words the prompt for it
@@ -69,7 +69,7 @@ def _prompt(e: dict, langs: list[str], escalation: bool) -> list[dict]:
               "they can hang up otherwise. Do not mention any key.") if escalation else ""
     shape = {"name": "short campaign name",
              "questions": [{"id": "q1", "label": "short English label for the dashboard", "only_if_confirmed": True,
-                            "options": ["English option label", "..."]}],
+                            "options": ["English option label", "another option", "Other"]}],
              "scripts": {l: {f: "..." for f in FIELDS} | {"questions": {"q1": "spoken question with every option and its key"}}
                          | ({"doubts": "..."} if escalation else {}) for l in langs},
              "system_prompt": "instructions for the voice agent that talks to each person",
@@ -89,14 +89,31 @@ Rules:
 - menu: the keypad options in this order: {menu}.
 - voicemail: under 30 words; say we will call again.
 - goodbye: one short sentence.{doubts}
-- questions: after the menu answer, the call can ask up to {MAX_QUESTIONS} follow-up keypad questions. Add only the ones
-  this particular event genuinely needs from each person, and none that do not fit: e.g. a hackathon may need team
-  status, food preference and T-shirt size; a workshop may need laptop or skill level; a plain seminar invitation, a
-  clinic reminder or a payment reminder usually needs none ([]). Each question has {MIN_OPTIONS} to {MAX_OPTIONS} short
-  options (keys 1, 2, 3... in order) and only_if_confirmed (true when it only matters for people who will attend).
+- questions: after the menu answer the call collects the details the organiser needs from each person, as follow-up
+  multiple-choice questions. Return {MIN_QUESTIONS} to {MAX_QUESTIONS} for EVERY event, whatever its type (not fewer than {MIN_QUESTIONS}): think
+  about everything an organiser of exactly this event needs to know from each person to plan it, and ask for all of it.
+  Aim for {MAX_QUESTIONS} whenever you can think of that many useful ones. Return [] only if the call is a bare notice
+  where nothing could be planned from the answers. Order them most important first. Typical ones by kind of event (pick and adapt, never copy blindly):
+    hackathon, contest or fest: team status (I have a team / I need a team / Solo), food preference, T-shirt size, laptop or equipment
+    workshop or training: skill level, laptop or materials, preferred batch or time slot, dietary needs
+    school notice or parent-teacher meeting: who will attend (Mother / Father / Both / Someone else), preferred time slot, language or translator needed, transport
+    clinic or health camp: preferred time slot, transport or wheelchair help needed, documents or reports ready, who is coming with the patient
+    payment or fee reminder: when they will pay (Today / This week / After the due date), payment mode (Online / Cash at the office / Cheque / Bank transfer), instalment or help needed
+    religious, community or society event: number attending (1 / 2 / 3 / 4 or more), pickup or transport needed, willing to volunteer or bring something, agenda item to raise
+    volunteer or staff confirmation: shift, T-shirt size, own transport, previous experience
+    seminar, conference or talk: number attending, session or topic of interest, dietary needs, accessibility needs
+  Each question has {MIN_OPTIONS} to {MAX_OPTIONS} short options (keys 1, 2, 3... in order). Use yes/no (2 options) ONLY for
+  a truly yes/no question. Otherwise give every realistic choice, 3 to {MAX_OPTIONS} options, and include "Other" or "None"
+  when some people will not fit the listed ones (e.g. food preference: Vegetarian, Non-vegetarian, Other dietary needs;
+  T-shirt size: S, M, L, XL, XXL). Options must be short, mutually exclusive, and cover the likely answers.
+  only_if_confirmed: set true only when the question makes sense solely for people who said yes (food, T-shirt size,
+  seating). Set it false when it matters for everyone who answers: a payment reminder's "when will you pay" and "how"
+  questions, "what time suits you" for people who want to reschedule, "why can you not come" for people who decline.
+  Mix them where the event allows; do not mark every question true. Never ask for anything private beyond what
+  the event needs (no ID numbers, bank details, health history). Do not invent facts in a question.
   label and options are in English (they are shown on the dashboard). In every language's script, "questions" holds
   the spoken question for each id, reading out every option with its key in order, e.g. "What would you like for
-  lunch? Press 1 for vegetarian, 2 for non-vegetarian."
+  lunch? Press 1 for vegetarian, 2 for non-vegetarian, 3 for other dietary needs."
 - retry: suggest max_attempts (1 to 4) and gap_hours (1 to 48) suited to this campaign type.
 - system_prompt: the instructions for the live voice agent that will phone each person and hold a natural conversation
   (in English, 120 to 250 words, second person: "You are..."). Cover: who it calls for and why, the tone suited to this

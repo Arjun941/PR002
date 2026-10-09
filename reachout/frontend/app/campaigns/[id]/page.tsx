@@ -160,6 +160,27 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
   });
 
   const calling = d.status === "running" || d.status === "preparing";
+  const openReset = () => modal({
+    title: "Reset all calls?",
+    danger: true,
+    body: (
+      <>
+        For development. <b style={{ color: "var(--text)" }}>{d.name}</b> goes back to the start: all {fmt.int(d.totals.recipients)} recipients
+        are queued again, and their call history, answers and recordings are deleted. The campaign stays paused until you resume it.
+        <dl className="facts">
+          <div><dt>Calls placed</dt><dd>{fmt.int(d.totals.calls_placed)}</dd></div>
+          <div><dt>Answered</dt><dd>{fmt.int(d.totals.answered)}</dd></div>
+        </dl>
+        <p className="muted" style={{ marginTop: 12, fontSize: 12 }}>This cannot be undone.</p>
+      </>
+    ),
+    confirmLabel: "Reset calls",
+    onConfirm: async () => {
+      const res = await post<{ reset: number }>(`/campaigns/${id}/reset`);
+      toast(`Reset ${fmt.int(res.reset)} recipients. Resume the campaign to call them again.`);
+      await refresh();
+    },
+  });
   const openDelete = () => modal({
     title: "Delete this campaign?",
     danger: true,
@@ -242,6 +263,11 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           </button>
           <button className="btn" disabled={calling} onClick={() => router.push(`/campaigns/${id}/edit`)}
             title={calling ? "Pause the campaign before editing it" : "Edit campaign"}><Icon name="type" />Edit</button>
+          {d.status === "completed" && (
+            <button className="btn" onClick={openReset} title="Development: forget every call and run this campaign again">
+              <Icon name="refresh" />Reset calls
+            </button>
+          )}
           <button className="btn danger" disabled={calling} onClick={openDelete} aria-label="Delete campaign"
             title={calling ? "Pause the campaign before deleting it" : "Delete campaign"}><Icon name="trash" /></button>
         </div>

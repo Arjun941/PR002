@@ -32,7 +32,7 @@ from pathlib import Path
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
-from . import audio, callctx, catalog, ivr, store
+from . import audio, callctx, catalog, endcall, ivr, store
 from .gemini_live import Resampler, audioop
 from .store import LANGUAGES
 
@@ -316,11 +316,12 @@ async def _converse(c: dict, r: dict, phone: Phone, sid: str, provider: str, pic
         q = qmap.get(qid)
         return bool(q) and option.isdigit() and 0 < int(option) <= len(q["options"]) and store.add_answer(sid, qid, option)
 
+    ended = asyncio.Event()  # the agent called end_call (only when asked to, or when the whole conversation is done)
     try:
-        await asyncio.wait_for(catalog.engine(provider)(
+        await asyncio.wait_for(endcall.run(catalog.engine(provider)(
             recv, send_audio, clear, {"language": LANGUAGES.get(r["language"], r["language"])}, r["language"], on_outcome,
             instructions=callctx.instructions(c, r), opening=callctx.opening(c, r), questions=list(qmap.values()),
-            on_answer=on_answer), MAX_SECONDS + RING_SECONDS)
+            on_answer=on_answer, on_end=ended.set), ended, lambda: time.monotonic() >= talk_until + 0.8), MAX_SECONDS + RING_SECONDS)
     except asyncio.TimeoutError:
         log.info("web phone call reached the %d s cap", MAX_SECONDS)
     except Exception as exc:

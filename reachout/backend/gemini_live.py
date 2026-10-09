@@ -87,7 +87,7 @@ async def bridge(recv: Callable[[], Awaitable[dict | None]], send_audio: Callabl
                  clear: Callable[[], Awaitable[None]], variables: dict[str, str], language: str,
                  on_outcome: Callable[[str], bool], preroll: bytes = b"", *, instructions: str = "",
                  opening: str = "", questions: list[dict] | None = None,
-                 on_answer: Callable[[str, str], bool] | None = None) -> None:
+                 on_answer: Callable[[str, str], bool] | None = None, on_end: Callable[[], None] | None = None) -> None:
     """recv() yields Exotel events (None when the call ends); audio is PCM16 8 kHz both ways.
     preroll: what the caller already said before we were connected; it is sent first.
     Outbound calls (the web phone) pass the campaign's `instructions`, an `opening` to start with, and the
@@ -107,6 +107,10 @@ async def bridge(recv: Callable[[], Awaitable[dict | None]], send_audio: Callabl
                 "question_id": types.Schema(type="STRING", enum=[q["id"] for q in questions]),
                 "option_number": types.Schema(type="INTEGER", description="The 1-based number of the chosen option")},
                 required=["question_id", "option_number"])))
+    if on_end:
+        declarations.append(types.FunctionDeclaration(
+            name="end_call", description="Hang up the call. Only when the person asks to end it, or the whole conversation is finished "
+                                         "and you have already said goodbye.", parameters=types.Schema(type="OBJECT", properties={})))
     config = types.LiveConnectConfig(
         response_modalities=["AUDIO"],
         system_instruction=instructions or system_prompt(variables, language),
@@ -145,7 +149,10 @@ async def bridge(recv: Callable[[], Awaitable[dict | None]], send_audio: Callabl
                         responses = []
                         for fc in m.tool_call.function_calls:
                             a = fc.args or {}
-                            if fc.name == "record_answer" and on_answer:
+                            if fc.name == "end_call" and on_end:
+                                on_end()
+                                ok = True
+                            elif fc.name == "record_answer" and on_answer:
                                 ok = on_answer(str(a.get("question_id", "")), str(a.get("option_number", "")))
                             else:
                                 ok = fc.name == "record_outcome" and on_outcome(str(a.get("outcome", "")))

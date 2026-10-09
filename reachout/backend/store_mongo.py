@@ -134,6 +134,19 @@ class MongoStore:
         self.recipients_c.delete_many({"campaign_id": cid})
         return self.campaigns_c.delete_one({"_id": cid}).deleted_count > 0
 
+    def reset_campaign(self, cid: str) -> int:
+        """Development: forget every call made. Recipients go back to queued with no attempts, answers or recordings; the
+        call log, history and saved audio of the campaign are deleted; the campaign is left paused. Returns the recipients reset."""
+        ids = [d["_id"] for d in self.recipients_c.find({"campaign_id": cid}, {"_id": 1})]
+        n = self.recipients_c.update_many({"campaign_id": cid}, {"$set": {
+            "outcome": "pending", "channel": None, "attempts": 0, "retrying": 0, "in_flight": 0, "call_sid": None,
+            "last_attempt_at": None, "recording_url": None, "answers": {}}}).matched_count
+        self.calls_c.delete_many({"campaign_id": cid})
+        self.audio_c.delete_many({"$or": [{"campaign_id": cid}, {"_id": {"$in": ids}}]})
+        self.history_c.delete_many({"campaign_id": cid})
+        self.campaigns_c.update_one({"_id": cid}, {"$set": {"status": "paused", "note": None}})
+        return n
+
     def pause_running(self, cid: str) -> None:
         self.campaigns_c.update_one({"_id": cid, "status": "running"}, {"$set": {"status": "paused"}})
 

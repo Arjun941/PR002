@@ -176,6 +176,19 @@ class SqliteStore:
             db.execute("DELETE FROM recipients WHERE campaign_id = ?", (cid,))
             return db.execute("DELETE FROM campaigns WHERE id = ?", (cid,)).rowcount > 0
 
+    def reset_campaign(self, cid: str) -> int:
+        """Development: forget every call made. Recipients go back to queued with no attempts, answers or recordings; the
+        call log, history and saved audio of the campaign are deleted; the campaign is left paused. Returns the recipients reset."""
+        with self._tx() as db:
+            n = db.execute("UPDATE recipients SET outcome = 'pending', channel = NULL, attempts = 0, retrying = 0, in_flight = 0, "
+                           "call_sid = NULL, last_attempt_at = NULL, recording_url = NULL, answers = '{}' WHERE campaign_id = ?", (cid,)).rowcount
+            db.execute("DELETE FROM calls WHERE campaign_id = ?", (cid,))
+            db.execute("DELETE FROM recording_audio WHERE campaign_id = ? OR call_id IN "
+                       "(SELECT id FROM recipients WHERE campaign_id = ?)", (cid, cid))
+            db.execute("DELETE FROM call_history WHERE campaign_id = ?", (cid,))
+            db.execute("UPDATE campaigns SET status = 'paused', note = NULL WHERE id = ?", (cid,))
+        return n
+
     def pause_running(self, cid: str) -> None:
         with self._tx() as db:
             db.execute("UPDATE campaigns SET status = 'paused' WHERE id = ? AND status = 'running'", (cid,))

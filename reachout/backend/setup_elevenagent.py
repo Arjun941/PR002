@@ -63,6 +63,11 @@ CONFIG = {
                     "parameters": {"type": "object", "required": ["question_id", "option_number"], "properties": {
                         "question_id": {"type": "string", "description": "The question's id, for example q1"},
                         "option_number": {"type": "integer", "description": "The number of the option the caller chose"}}},
+                }, {
+                    "type": "client", "name": "end_call", "expects_response": True,
+                    "description": "Hang up the call. Only when the caller asks to end it, or the whole conversation is finished and you "
+                                   "have already said goodbye.",
+                    "parameters": {"type": "object", "properties": {}},
                 }],
             },
         },

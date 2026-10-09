@@ -4,6 +4,7 @@ questions and how to save answers. Shared by every provider; the engine adds onl
 """
 from __future__ import annotations
 
+from . import endcall
 from .store import LANGUAGES
 
 PLACEHOLDERS = ("name", "language", "org", "title", "date", "time", "venue")
@@ -60,7 +61,7 @@ def opening(c: dict, r: dict) -> str:
     return fill(" ".join(x.strip() for x in (s.get("greeting", ""), s.get("message", "")) if x.strip()), c, r)
 
 
-def instructions(c: dict, r: dict, ivr_done: str = "") -> str:
+def instructions(c: dict, r: dict, ivr_done: str = "", on_end_tool: bool = True) -> str:
     """The full system instruction for this call. ivr_done: hybrid mode, the person has already been through the
     automated menu (and chose this answer) and is now asking a question."""
     e, s, qs = c.get("event") or {}, script_for(c, r), c.get("questions") or []
@@ -74,6 +75,8 @@ def instructions(c: dict, r: dict, ivr_done: str = "") -> str:
         "Facts about this call (use only these):", event_facts(e),
         "", VOICE_RULE,
     ]
+    if on_end_tool:
+        parts += ["", endcall.INSTRUCTION]
     written = [(k, s.get(k)) for k in ("greeting", "message", "doubts", "goodbye") if s.get(k)]  # not "menu": that is keys
     if written:
         parts += ["", f"The approved script in {lang}. Say it in your own natural words, keeping the facts exactly:"]

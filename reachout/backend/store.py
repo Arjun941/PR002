@@ -36,6 +36,7 @@ calls_since = _s.calls_since
 insert_campaign = _s.insert_campaign
 set_status = _s.set_status
 delete_campaign = _s.delete_campaign
+reset_campaign = _s.reset_campaign
 set_recording_url = _s.set_recording_url
 save_recording = _s.save_recording
 load_recording = _s.load_recording

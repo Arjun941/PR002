@@ -16,6 +16,7 @@ clear(), finish(), until, _now(), call_sid. Audio is PCM16 8 kHz mono. recv() yi
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import math
@@ -23,7 +24,7 @@ import os
 from array import array
 from collections import deque
 
-from . import callctx, catalog, store
+from . import callctx, catalog, endcall, store
 from .store import LANGUAGES
 
 log = logging.getLogger("reachout.ivr")
@@ -64,12 +65,14 @@ async def _escalate(line, c: dict, r: dict, outcome: str, question: bytes) -> bo
     False if it could not be reached."""
     provider = c.get("provider") or c.get("agent_provider") or "elevenlabs"
     instructions = callctx.instructions(c, r, ivr_done=outcome)
+    ended = asyncio.Event()
     record_outcome(line.call_sid, None, "agent")
     log.info("call %s: handing over to the %s agent", line.call_sid, provider)
     try:
-        await catalog.engine(provider)(
+        await endcall.run(catalog.engine(provider)(
             line.recv, line.send, line.clear, {"language": LANGUAGES.get(r["language"], r["language"]), "answer": outcome},
-            r["language"], lambda o: record_outcome(line.call_sid, o, "agent"), preroll=question, instructions=instructions)
+            r["language"], lambda o: record_outcome(line.call_sid, o, "agent"), preroll=question, instructions=instructions,
+            on_end=ended.set), ended, lambda: line._now() >= line.until + 0.8)
     except Exception as exc:  # connect failed: the caller is still on the IVR call
         log.warning("call %s: live agent unavailable (%s)", line.call_sid, type(exc).__name__)
         record_outcome(line.call_sid, None, "keypad")
