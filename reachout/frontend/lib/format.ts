@@ -9,7 +9,7 @@ export const KIND: Record<string, string> = {
   seminar: "Seminar", clinic: "Clinic reminder", school: "School notice", payment: "Payment reminder",
 };
 export const CHANNEL: Record<string, string> = { keypad: "Keypad", speech: "Speech", agent: "Voice agent" };
-export const STATUS: Record<string, string> = { running: "Running", completed: "Completed", paused: "Paused" };
+export const STATUS: Record<string, string> = { preparing: "Preparing voice", running: "Running", completed: "Completed", paused: "Paused" };
 
 const nf = new Intl.NumberFormat("en-IN");
 export const fmt = {

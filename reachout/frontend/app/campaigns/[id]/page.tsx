@@ -1,20 +1,33 @@
 "use client";
-import { use, useState } from "react";
-import { api } from "@/lib/api";
+import { use, useRef, useState } from "react";
+import { api, post } from "@/lib/api";
 import { ago, CHANNEL, fmt, KIND, ORDER, OUT } from "@/lib/format";
-import type { Detail, Handling } from "@/lib/types";
+import { SCRIPT_FIELDS, type Detail, type Recipient } from "@/lib/types";
 import { useData, usePoll } from "@/components/hooks";
-import { Icon, type IconName } from "@/components/Icon";
+import { Icon } from "@/components/Icon";
 import { useCrumbs, useShell } from "@/components/Shell";
-import { Breakdown, ErrorView, OutcomePill, PageHead, Skeleton, Stat, StatusPill } from "@/components/ui";
+import { Breakdown, ErrorView, HandlingCard, Notice, OutcomePill, Skeleton, Stat, StatusPill } from "@/components/ui";
 
 const NON_RESPONDER = ["voicemail", "no_answer"];
+const FIELD_LABEL = { greeting: "Greeting", message: "Message", menu: "Keypad menu", voicemail: "Voicemail", goodbye: "Goodbye" };
 
-function HandlingItem({ icon, label, x }: { icon: IconName; label: string; x: Handling }) {
+function Scripts({ d }: { d: Detail }) {
+  const [tab, setTab] = useState(0);
+  const s = d.scripts[tab];
   return (
-    <div className="h-item"><Icon name={icon} size={18} />
-      <div><div className="h-label">{label}</div><div className="h-main">{x.provider}</div><div className="h-note">{x.note}</div></div>
-    </div>
+    <section className="card">
+      <div className="card-head"><h2>What recipients hear</h2>
+        <span className="muted" style={{ fontSize: 13 }}>Up to {d.retry_policy.max_attempts} attempts, {d.retry_policy.gap_hours} h apart</span>
+      </div>
+      <div className="tabs" role="tablist">
+        {d.scripts.map((x, i) => (
+          <button key={x.language} role="tab" aria-selected={tab === i} className={tab === i ? "on" : ""} onClick={() => setTab(i)}>{x.language}</button>
+        ))}
+      </div>
+      <div className="script"><dl>
+        {SCRIPT_FIELDS.map(f => <div key={f}><dt>{FIELD_LABEL[f]}</dt><dd>{s[f]}</dd></div>)}
+      </dl></div>
+    </section>
   );
 }
 
@@ -23,10 +36,12 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
   const { toast, modal } = useShell();
   const { data: d, setData, error, retry } = useData(() => api<Detail>(`/campaigns/${id}`), [id]);
   const [f, setF] = useState({ q: "", outcome: "all", language: "all", segment: "all", limit: 50 });
+  const [playing, setPlaying] = useState<Recipient | null>(null);
+  const pinRef = useRef<HTMLInputElement>(null);
 
   useCrumbs([["Campaigns", "/campaigns"], [d?.name ?? "Campaign"]]);
   const refresh = async () => { try { setData(await api<Detail>(`/campaigns/${id}`)); } catch { /* keep last good view */ } };
-  usePoll(refresh, 2500, !!d && (d.status === "running" || d.totals.retrying > 0));
+  usePoll(refresh, 2500, !!d && (d.status === "running" || d.status === "preparing" || d.totals.retrying > 0));
 
   if (error !== null) return <main className="view"><ErrorView status={error} retry={retry} /></main>;
   if (!d) return <main className="view"><Skeleton /></main>;
@@ -47,6 +62,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
     body: (
       <>
         Recipients who reached voicemail or did not pick up will be called again with the same script, in their own language.
+        {d.status === "paused" && " The campaign is paused, so calls start when you resume it."}
         <dl className="facts">
           <div><dt>Recipients</dt><dd>{fmt.int(n)}</dd></div>
           <div><dt>Made up of</dt><dd>{fmt.int(s.counts.voicemail)} voicemail, {fmt.int(s.counts.no_answer)} no answer</dd></div>
@@ -56,11 +72,46 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
     ),
     confirmLabel: `Call ${fmt.int(n)} again`,
     onConfirm: async () => {
-      const res = await api<{ queued: number }>(`/campaigns/${id}/retry`, { method: "POST" });
+      const res = await post<{ queued: number }>(`/campaigns/${id}/retry`);
       toast(`Retrying ${fmt.int(res.queued)} recipients`);
       await refresh();
     },
   });
+
+  const setStatus = async (status: "running" | "paused") => {
+    try {
+      await post(`/campaigns/${id}/status`, { status });
+      toast(status === "paused" ? "Paused. Calls already ringing will finish." : "Resumed");
+      await refresh();
+    } catch (e) { toast((e as Error).message, "error"); }
+  };
+
+  // Recordings are personal data: playback needs a PIN-unlocked session, and the server logs every play.
+  const play = async (r: Recipient) => {
+    let access: { enabled: boolean; unlocked: boolean };
+    try { access = await api("/auth/recordings"); } catch (e) { toast((e as Error).message, "error"); return; }
+    if (!access.enabled) { toast("Recording playback is off. Set RECORDINGS_PIN on the server to turn it on.", "info"); return; }
+    if (access.unlocked) { setPlaying(r); return; }
+    modal({
+      title: "Unlock recordings",
+      body: (
+        <>
+          Call recordings are personal data. Enter the recordings PIN to listen for the next 15 minutes. Each play is logged.
+          <input ref={pinRef} className="input" type="password" inputMode="numeric" autoComplete="off" autoFocus
+            aria-label="Recordings PIN" placeholder="PIN" style={{ width: "100%", marginTop: 14 }} />
+        </>
+      ),
+      confirmLabel: "Unlock and play",
+      onConfirm: async () => {
+        await post("/auth/recordings", { pin: pinRef.current?.value ?? "" });
+        setPlaying(r);
+      },
+    });
+  };
+  const lock = async () => {
+    setPlaying(null);
+    try { await post("/auth/recordings", undefined, "DELETE"); toast("Recordings locked"); } catch { /* cookie expires anyway */ }
+  };
 
   return (
     <main className="view enter">
@@ -69,11 +120,14 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           <h1>{d.name}</h1>
           <div className="meta">
             <StatusPill s={d.status} /><span className="chip">{KIND[d.kind] || d.kind}</span>
+            {d.simulated && <span className="chip" title="Demo mode: no real calls were placed">Simulated</span>}
             {d.languages.map(l => <span key={l} className="chip">{l}</span>)}
             <span className="muted">Started {ago(d.started_at)}</span>
           </div>
         </div>
-        <div className="actions">
+        <div className="actions" style={{ display: "flex", gap: 8 }}>
+          {(d.status === "running" || d.status === "preparing") && <button className="btn" onClick={() => void setStatus("paused")}><Icon name="pause" />Pause</button>}
+          {d.status === "paused" && <button className="btn" onClick={() => void setStatus("running")}><Icon name="play" />Resume</button>}
           <button className="btn primary" disabled={n === 0 || busy} onClick={openRetry}
             title={n === 0 && !busy ? "No one is waiting for a retry" : ""}>
             {busy ? <span className="spinner" /> : <Icon name="refresh" />}
@@ -95,12 +149,9 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
         <div className="card"><div className="card-head"><h2>Outcomes by audience segment</h2></div><Breakdown list={d.by_segment} /></div>
       </section>
 
-      <section className="card handling">
-        <div className="card-head"><h2>Where your data is processed</h2></div>
-        <HandlingItem icon="mic" label="Voice" x={d.handling.audio} />
-        <HandlingItem icon="type" label="Language" x={d.handling.text} />
-        <HandlingItem icon="lock" label="Recordings" x={d.handling.recordings} />
-      </section>
+      {d.note && <div className="stack-gap"><Notice kind={d.status === "paused" ? "warn" : "info"}>{d.note}</Notice></div>}
+      <HandlingCard h={d.handling} />
+      {d.scripts.length > 0 && <Scripts d={d} />}
 
       <section className="card">
         <div className="card-head"><h2>Recipients</h2>
@@ -120,17 +171,31 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
             </select>
           </div>
         </div>
+        {playing && (
+          <div className="player">
+            <span className="who"><Icon name="lock" size={14} /> Recording · <b>{playing.name}</b>{d.simulated && <span className="muted"> (demo tone)</span>}</span>
+            <audio key={playing.id} src={`/api/recordings/${encodeURIComponent(playing.id)}`} controls autoPlay
+              onError={() => { setPlaying(null); toast("Could not play the recording. The session may have expired; unlock again.", "error"); }} />
+            <button className="btn sm" onClick={() => void lock()}>Lock</button>
+            <button className="btn sm ghost" aria-label="Close player" onClick={() => setPlaying(null)}><Icon name="x" size={14} /></button>
+          </div>
+        )}
         {rows.length ? (
           <>
             <div className="table-wrap">
               <table className="table">
-                <thead><tr><th>Name</th><th>Phone</th><th>Language</th><th>Segment</th><th>Outcome</th><th>Replied by</th><th className="num">Attempts</th></tr></thead>
+                <thead><tr><th>Name</th><th>Phone</th><th>Language</th><th>Segment</th><th>Outcome</th><th>Replied by</th><th className="num">Attempts</th><th><span className="sr-only">Recording</span></th></tr></thead>
                 <tbody>
                   {shown.map(r => (
                     <tr key={r.id}>
                       <td>{r.name}</td><td className="mono muted">{r.phone}</td><td>{r.language}</td>
                       <td className="muted">{r.segment}</td><td><OutcomePill r={r} /></td>
                       <td className="muted">{r.channel ? CHANNEL[r.channel] : "–"}</td><td className="num">{r.attempts}</td>
+                      <td className="num">{r.has_recording && (
+                        <button className="btn sm ghost" onClick={() => void play(r)} aria-label={`Play recording for ${r.name}`}>
+                          <Icon name="play" size={12} />Play
+                        </button>
+                      )}</td>
                     </tr>
                   ))}
                 </tbody>

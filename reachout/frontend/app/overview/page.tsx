@@ -4,6 +4,7 @@ import { api } from "@/lib/api";
 import { fmt } from "@/lib/format";
 import type { Overview } from "@/lib/types";
 import { useData } from "@/components/hooks";
+import { AssistantChat } from "@/components/AssistantChat";
 import { useCrumbs } from "@/components/Shell";
 import { Breakdown, CampaignTable, DailyChart, ErrorView, Legend, PageHead, Skeleton, Stat } from "@/components/ui";
 
@@ -14,10 +15,23 @@ export default function OverviewPage() {
   if (error !== null) return <main className="view"><ErrorView status={error} retry={retry} /></main>;
   if (!d) return <main className="view"><Skeleton /></main>;
 
+  if (!d.campaigns.length) return (
+    <main className="view enter">
+      <PageHead title="Overview" sub="How your calling campaigns are performing." />
+      <AssistantChat />
+      <div className="card empty">
+        <h2>No campaigns yet</h2>
+        <p>Paste your event details, pick languages and review the drafted scripts before anyone is called.</p>
+        <p style={{ marginTop: 16 }}><Link className="btn primary" href="/campaigns/new" style={{ textDecoration: "none" }}>Create a campaign</Link></p>
+      </div>
+    </main>
+  );
+
   const s = d.totals;
   return (
     <main className="view enter">
       <PageHead title="Overview" sub="How your calling campaigns are performing." />
+      <AssistantChat />
       <section className="grid-4">
         <Stat label="Calls placed" value={s.calls_placed} kind="int" sub={`to ${fmt.int(s.contacted)} of ${fmt.int(s.recipients)} recipients`} />
         <Stat label="Answer rate" value={s.answer_rate} kind="pct" sub={`${fmt.int(s.answered)} calls answered`} />

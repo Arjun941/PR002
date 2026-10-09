@@ -2,8 +2,9 @@
 import Link from "next/link";
 import { useEffect, useState, type ReactNode } from "react";
 import { ago, fmt, KIND, ORDER, OUT, STATUS, type FmtKind } from "@/lib/format";
-import type { Counts, Day, Group, Recipient, Status, Summary } from "@/lib/types";
+import type { Counts, Day, Detail, Group, Handling, Recipient, Status, Summary } from "@/lib/types";
 import { useGrown } from "./hooks";
+import { Icon, type IconName } from "./Icon";
 
 export function PageHead({ title, sub, actions }: { title: ReactNode; sub: string; actions?: ReactNode }) {
   return (
@@ -126,7 +127,7 @@ export function CampaignTable({ list, detailed }: { list: Summary[]; detailed: b
             <tr key={c.id} className="clickable">
               <td>
                 <Link href={`/campaigns/${c.id}`} className="cell-main" style={{ display: "block" }}>{c.name}</Link>
-                <div className="cell-sub">{KIND[c.kind] || c.kind}</div>
+                <div className="cell-sub">{KIND[c.kind] || c.kind}{c.simulated && " · Simulated"}</div>
               </td>
               <td><StatusPill s={c.status} /></td>
               <td className="muted">{c.languages.join(", ")}</td>
@@ -140,6 +141,29 @@ export function CampaignTable({ list, detailed }: { list: Summary[]; detailed: b
       </table>
     </div>
   );
+}
+
+function HandlingItem({ icon, label, x }: { icon: IconName; label: string; x: Handling }) {
+  return (
+    <div className="h-item"><Icon name={icon} size={18} />
+      <div><div className="h-label">{label}</div><div className="h-main">{x.provider}</div><div className="h-note">{x.note}</div></div>
+    </div>
+  );
+}
+
+export function HandlingCard({ h, title = "Where your data is processed" }: { h: Detail["handling"]; title?: string }) {
+  return (
+    <section className="card handling">
+      <div className="card-head"><h2>{title}</h2></div>
+      <HandlingItem icon="mic" label="Voice" x={h.audio} />
+      <HandlingItem icon="type" label="Language" x={h.text} />
+      <HandlingItem icon="lock" label="Recordings" x={h.recordings} />
+    </section>
+  );
+}
+
+export function Notice({ kind = "warn", children }: { kind?: "warn" | "info"; children: ReactNode }) {
+  return <div className={`notice ${kind}`}><Icon name={kind === "warn" ? "alert" : "info"} /><div>{children}</div></div>;
 }
 
 export function Skeleton() {

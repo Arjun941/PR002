@@ -1,138 +1,28 @@
-"""Reachout: dashboard API (Phase 0, mock data).
+"""Reachout: dashboard API on real data (SQLite).
 
-Everything in here is seeded demo data so the dashboard can be built and
-judged before Exotel access lands. The response shapes are the contract the
-real call engine will fill in later, so the frontend should not need to change.
+Campaigns come from the builder (backend/builder.py) and calls are placed by the dialer
+(backend/dialer.py), which records outcomes from Exotel's status callback and the voicebot.
+DEMO=1 seeds sample campaigns into an empty database and simulates calls for them; without
+it nothing here is fake.
 
 Run from the project root:  uvicorn backend.main:app --reload
-Set DEMO_LIVE=0 to stop the background simulator that resolves pending calls.
 """
 from __future__ import annotations
 
 import asyncio
-import os
-import random
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from . import exotel
+from . import assistant, audio, chatgpt, demo, dialer, exotel, store
+from .builder import DEMO, router as builder_router
+from .costs import RETRY_ESTIMATE_PER_CALL, recipient_cost
+from .recordings import router as recordings_router
+from .store import ANSWERED, LANGUAGES, NON_RESPONDER, OUTCOMES
 from .voicebot import router as voicebot_router
-
-DEMO_LIVE = os.getenv("DEMO_LIVE", "1") == "1"
-
-LANGUAGES = {"en": "English", "hi": "Hindi", "mr": "Marathi", "ta": "Tamil", "kn": "Kannada"}
-ANSWERED = ("confirmed", "declined", "rescheduled")
-NON_RESPONDER = ("voicemail", "no_answer")
-OUTCOMES = ("confirmed", "rescheduled", "declined", "voicemail", "no_answer", "pending")
-
-# Rough per-call cost model in INR (see the cost comparison): telephony only for
-# keypad calls, plus an extra when the live voice agent had to step in.
-COST = {"answered": 0.7, "agent_extra": 3.0, "unanswered": 0.3}
-RETRY_ESTIMATE_PER_CALL = 0.45
-
-FIRST = ["Aarav", "Vihaan", "Ananya", "Diya", "Rohan", "Isha", "Kabir", "Meera", "Arjun", "Saanvi",
-         "Neha", "Rahul", "Priya", "Karan", "Sneha", "Aditya", "Pooja", "Vikram", "Lakshmi", "Imran",
-         "Farah", "Gurpreet", "Divya", "Suresh", "Anjali", "Manoj", "Kavya", "Harsh", "Nisha", "Tarun"]
-LAST = "ABCDEGHJKMNPRSTV"
-
-SPECS = [
-    dict(id="pune-ai-summit", name="Pune AI Summit: invitations", kind="seminar", status="running",
-         langs={"en": .35, "hi": .40, "mr": .25}, segments={"Students": .5, "Faculty": .2, "Alumni": .3},
-         size=420, done=.78, pickup=.58, mix={"confirmed": .52, "declined": .30, "rescheduled": .18}, days_ago=2,
-         handling=dict(audio=dict(provider="Sarvam", note="Processed in India"),
-                       text=dict(provider="Ollama (local)", note="Stays on this machine"),
-                       recordings=dict(provider="Exotel", note="Stored in India, deleted after 30 days"))),
-    dict(id="sunrise-clinic", name="Sunrise Clinic: appointment reminders", kind="clinic", status="completed",
-         langs={"hi": .45, "en": .30, "ta": .25}, segments={"Follow-ups": .6, "New patients": .4},
-         size=260, done=1.0, pickup=.71, mix={"confirmed": .74, "declined": .06, "rescheduled": .20}, days_ago=5,
-         handling=dict(audio=dict(provider="Sarvam", note="Processed in India"),
-                       text=dict(provider="Ollama (local)", note="Stays on this machine"),
-                       recordings=dict(provider="Exotel", note="Stored in India, deleted after 7 days"))),
-    dict(id="greenfield-ptm", name="Greenfield School: PTM on 18 Oct", kind="school", status="completed",
-         langs={"en": .30, "hi": .45, "kn": .25}, segments={"Classes 1–5": .4, "Classes 6–8": .35, "Classes 9–10": .25},
-         size=380, done=1.0, pickup=.64, mix={"confirmed": .61, "declined": .09, "rescheduled": .30}, days_ago=6,
-         handling=dict(audio=dict(provider="Piper (local)", note="Stays on this machine"),
-                       text=dict(provider="Ollama (local)", note="Stays on this machine"),
-                       recordings=dict(provider="Exotel", note="Stored in India, deleted after 30 days"))),
-    dict(id="fee-reminder-t2", name="Term 2 fee reminders", kind="payment", status="paused",
-         langs={"en": .40, "hi": .60}, segments={"Due this week": .55, "Overdue": .45},
-         size=300, done=.55, pickup=.49, mix={"confirmed": .46, "declined": .14, "rescheduled": .40}, days_ago=1,
-         handling=dict(audio=dict(provider="Piper (local)", note="Stays on this machine"),
-                       text=dict(provider="Keypad only", note="No speech is processed"),
-                       recordings=dict(provider="Exotel", note="Stored in India, deleted after 30 days"))),
-]
-
-CAMPAIGNS: dict[str, dict] = {}
-_tasks: set[asyncio.Task] = set()
-
-
-def _weighted(rng: random.Random, weights: dict) -> str:
-    keys = list(weights)
-    return rng.choices(keys, weights=[weights[k] for k in keys])[0]
-
-
-def _clamp(v: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, v))
-
-
-def _resolve(rng: random.Random, c: dict, r: dict, day: int = 0) -> None:
-    """Simulate one call attempt finishing for recipient r."""
-    r["attempts"] += 1
-    r["retrying"] = False
-    if rng.random() < r["_p"]:
-        r["outcome"] = _weighted(rng, c["_mix"])
-        r["channel"] = _weighted(rng, {"keypad": .78, "speech": .14, "agent": .08})
-    else:
-        r["outcome"] = rng.choices(["voicemail", "no_answer"], [.55, .45])[0]
-        r["channel"] = None
-    c["_events"].append((day, r["outcome"] in ANSWERED))
-
-
-def _build() -> None:
-    rng = random.Random(42)
-    now = datetime.now(timezone.utc)
-    for spec in SPECS:
-        seg_adj = {s: rng.uniform(-.08, .08) for s in spec["segments"]}
-        lang_adj = {l: rng.uniform(-.07, .07) for l in spec["langs"]}
-        c = {
-            "id": spec["id"], "name": spec["name"], "kind": spec["kind"], "status": spec["status"],
-            "languages": [LANGUAGES[l] for l in spec["langs"]],
-            "segments": list(spec["segments"]),
-            "started_at": (now - timedelta(days=spec["days_ago"], hours=3)).isoformat(),
-            "handling": spec["handling"], "_mix": spec["mix"], "_events": [], "recipients": [],
-        }
-        for i in range(spec["size"]):
-            lang = _weighted(rng, spec["langs"])
-            seg = _weighted(rng, spec["segments"])
-            r = {
-                "id": f"{spec['id']}-{i}",
-                "name": f"{rng.choice(FIRST)} {rng.choice(LAST)}.",
-                # Contact numbers are masked at the source: the dashboard never needs the full number.
-                "phone": f"+91 {rng.choice('6789')}•••• ••{rng.randint(10, 99)}",
-                "language": LANGUAGES[lang], "segment": seg,
-                "outcome": "pending", "channel": None, "attempts": 0, "retrying": False,
-                "_p": _clamp(spec["pickup"] + seg_adj[seg] + lang_adj[lang], .2, .9),
-            }
-            if rng.random() < spec["done"]:
-                _resolve(rng, c, r, day=rng.randint(0, spec["days_ago"]))
-                if r["outcome"] in NON_RESPONDER and spec["done"] == 1.0 and rng.random() < .35:
-                    _resolve(rng, c, r, day=rng.randint(0, spec["days_ago"]))
-            c["recipients"].append(r)
-        CAMPAIGNS[c["id"]] = c
-
-
-def _cost(r: dict) -> float:
-    if r["outcome"] == "pending":
-        return r["attempts"] * COST["unanswered"]
-    cost = (r["attempts"] - 1) * COST["unanswered"]
-    if r["outcome"] in ANSWERED:
-        cost += COST["answered"] + (COST["agent_extra"] if r["channel"] == "agent" else 0)
-    else:
-        cost += COST["unanswered"]
-    return cost
 
 
 def _totals(recs: list[dict]) -> dict:
@@ -143,8 +33,8 @@ def _totals(recs: list[dict]) -> dict:
         counts[r["outcome"]] += 1
         calls += r["attempts"]
         contacted += r["attempts"] > 0
-        retrying += r["retrying"]
-        cost += _cost(r)
+        retrying += bool(r["retrying"])
+        cost += recipient_cost(r)
     answered = sum(counts[k] for k in ANSWERED)
     return {
         "recipients": len(recs), "contacted": contacted, "calls_placed": calls, "answered": answered,
@@ -158,7 +48,8 @@ def _totals(recs: list[dict]) -> dict:
 def _group(recs: list[dict], key: str) -> list[dict]:
     groups: dict[str, list[dict]] = {}
     for r in recs:
-        groups.setdefault(r[key], []).append(r)
+        k = LANGUAGES.get(r[key], r[key]) if key == "language" else r[key]
+        groups.setdefault(k, []).append(r)
     out = []
     for k, rs in groups.items():
         t = _totals(rs)
@@ -167,115 +58,120 @@ def _group(recs: list[dict], key: str) -> list[dict]:
     return sorted(out, key=lambda g: -g["total"])
 
 
-def _summary(c: dict) -> dict:
-    return {k: c[k] for k in ("id", "name", "kind", "status", "languages", "segments", "started_at")} | {
-        "totals": _totals(c["recipients"])}
+def _summary(c: dict, recs: list[dict]) -> dict:
+    return {k: c[k] for k in ("id", "name", "kind", "status", "segments", "started_at", "simulated")} | {
+        "languages": [LANGUAGES.get(l, l) for l in c["languages"]], "totals": _totals(recs)}
+
+
+def _by_campaign() -> list[tuple[dict, list[dict]]]:
+    recs: dict[str, list[dict]] = {}
+    for r in store.recipients():
+        recs.setdefault(r["campaign_id"], []).append(r)
+    return [(c, recs.get(c["id"], [])) for c in store.campaigns()]
 
 
 def _daily() -> list[dict]:
-    today = datetime.now().date()
-    out = []
-    for off in range(6, -1, -1):
-        day = today - timedelta(days=off)
-        calls = answered = 0
-        for c in CAMPAIGNS.values():
-            for o, a in c["_events"]:
-                if o == off:
-                    calls += 1
-                    answered += a
-        out.append({"label": "Today" if off == 0 else day.strftime("%a"), "calls": calls, "answered": answered})
-    return out
-
-
-def _refresh_status(c: dict) -> None:
-    if c["status"] == "running" and not any(r["outcome"] == "pending" for r in c["recipients"]):
-        c["status"] = "completed"
+    today = datetime.now().astimezone().date()
+    days = {today - timedelta(days=off): [0, 0] for off in range(6, -1, -1)}
+    since = datetime.combine(today - timedelta(days=6), datetime.min.time()).astimezone().astimezone(timezone.utc)
+    for call in store.calls_since(since.isoformat(timespec="seconds")):
+        day = datetime.fromisoformat(call["at"]).astimezone().date()
+        if day in days:
+            days[day][0] += 1
+            days[day][1] += call["answered"]
+    return [{"label": "Today" if d == today else d.strftime("%a"), "calls": n, "answered": a}
+            for d, (n, a) in days.items()]
 
 
 def _get(cid: str) -> dict:
-    if cid not in CAMPAIGNS:
+    c = store.campaign(cid)
+    if not c:
         raise HTTPException(404, "Campaign not found")
-    return CAMPAIGNS[cid]
-
-
-async def _live_loop() -> None:
-    """Demo only: keep running campaigns moving so the dashboard feels live."""
-    rng = random.Random()
-    while True:
-        await asyncio.sleep(1.5)
-        for c in CAMPAIGNS.values():
-            if c["status"] != "running":
-                continue
-            idle = [r for r in c["recipients"] if r["outcome"] == "pending" and not r["retrying"]]
-            for r in rng.sample(idle, min(len(idle), rng.randint(1, 3))):
-                _resolve(rng, c, r)
-            _refresh_status(c)
-
-
-async def _retry_worker(c: dict, targets: list[dict]) -> None:
-    rng = random.Random()
-    rng.shuffle(targets)
-    for r in targets:
-        await asyncio.sleep(rng.uniform(.05, .2))
-        _resolve(rng, c, r)
-        _refresh_status(c)
+    return c
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    task = asyncio.create_task(_live_loop()) if DEMO_LIVE else None
+    store.init()
+    if DEMO and not store.has_campaigns():
+        demo.seed()
+    tasks = [asyncio.create_task(dialer.run()), asyncio.create_task(audio.run())]
+    tasks += [asyncio.create_task(demo.simulate())] if DEMO else []
     yield
-    if task:
-        task.cancel()
+    for t in tasks:
+        t.cancel()
 
 
-_build()
 app = FastAPI(title="Reachout", lifespan=lifespan)
 app.include_router(voicebot_router)
+app.include_router(builder_router)
+app.include_router(chatgpt.router)
+app.include_router(assistant.router)
+app.include_router(dialer.router)
+app.include_router(recordings_router)
 
 
 @app.get("/api/overview")
 def overview():
-    recs = [r for c in CAMPAIGNS.values() for r in c["recipients"]]
+    pairs = _by_campaign()
+    recs = [r for _, rs in pairs for r in rs]
     return {
         "totals": _totals(recs),
         "by_language": _group(recs, "language"),
         "daily": _daily(),
-        "campaigns": [_summary(c) for c in CAMPAIGNS.values()],
+        "campaigns": [_summary(c, rs) for c, rs in pairs],
     }
 
 
 @app.get("/api/campaigns")
 def list_campaigns():
-    return {"campaigns": [_summary(c) for c in CAMPAIGNS.values()]}
+    return {"campaigns": [_summary(c, rs) for c, rs in _by_campaign()]}
 
 
 @app.get("/api/campaigns/{cid}")
 def campaign_detail(cid: str):
     c = _get(cid)
-    recs = c["recipients"]
-    public = ("id", "name", "phone", "language", "segment", "outcome", "channel", "attempts", "retrying")
-    return _summary(c) | {
+    recs = store.recipients(cid)
+    return _summary(c, recs) | {
         "by_language": _group(recs, "language"),
         "by_segment": _group(recs, "segment"),
         "handling": c["handling"],
         "retry_estimate_inr": round(sum(r["outcome"] in NON_RESPONDER for r in recs) * RETRY_ESTIMATE_PER_CALL, 1),
-        "recipients": [{k: r[k] for k in public} for r in recs],
+        "retry_policy": c["retry"],
+        "note": c["note"],
+        "scripts": [{"language": LANGUAGES.get(l, l)} | s for l, s in c["scripts"].items()],
+        "recipients": [store.public_recipient(r) for r in recs],
     }
 
 
 @app.post("/api/campaigns/{cid}/retry")
-async def retry_non_responders(cid: str):
+def retry_non_responders(cid: str):
     c = _get(cid)
-    targets = [r for r in c["recipients"] if r["outcome"] in NON_RESPONDER]
-    if not targets:
-        return {"queued": 0}
-    for r in targets:
-        r["outcome"], r["channel"], r["retrying"] = "pending", None, True
-    task = asyncio.create_task(_retry_worker(c, targets))
-    _tasks.add(task)
-    task.add_done_callback(_tasks.discard)
-    return {"queued": len(targets)}
+    with store.tx() as db:
+        n = db.execute("UPDATE recipients SET outcome = 'pending', channel = NULL, retrying = 1 "
+                       "WHERE campaign_id = ? AND in_flight = 0 AND outcome IN ('voicemail', 'no_answer')",
+                       (cid,)).rowcount
+        if n and c["status"] == "completed":
+            db.execute("UPDATE campaigns SET status = 'running' WHERE id = ?", (cid,))
+    return {"queued": n}
+
+
+class StatusChange(BaseModel):
+    status: Literal["running", "paused"]
+
+
+@app.post("/api/campaigns/{cid}/status")
+def change_status(cid: str, body: StatusChange):
+    """Pause stops new calls at once (calls already ringing finish). Resume picks up where it left off,
+    first finishing the voice synthesis if a live campaign's audio is not ready."""
+    c = _get(cid)
+    if c["status"] == "completed":
+        raise HTTPException(409, "Campaign has already finished")
+    status = body.status
+    if status == "running" and not c["simulated"] and not c["audio_ready"]:
+        status = "preparing"
+    store.set_status(cid, status)
+    return {"status": status}
 
 
 class TestCall(BaseModel):
@@ -288,4 +184,3 @@ async def test_call(body: TestCall):
     if not exotel.configured():
         raise HTTPException(503, "Exotel is not configured (see .env.example)")
     return await exotel.place_call(body.to)
-

@@ -37,6 +37,7 @@ function ModalView({ spec, onClose }: { spec: ModalSpec; onClose: () => void }) 
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const okRef = useRef<HTMLButtonElement>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
   const { toast } = useShell();
   const closing = useRef(false);
 
@@ -50,7 +51,8 @@ function ModalView({ spec, onClose }: { spec: ModalSpec; onClose: () => void }) 
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null;
     requestAnimationFrame(() => setOpen(true));
-    okRef.current?.focus();
+    // An autoFocus input in the body keeps focus; otherwise focus the confirm button.
+    if (!boxRef.current?.contains(document.activeElement)) okRef.current?.focus();
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
     document.addEventListener("keydown", onKey);
     return () => { document.removeEventListener("keydown", onKey); prev?.focus?.(); };
@@ -64,7 +66,8 @@ function ModalView({ spec, onClose }: { spec: ModalSpec; onClose: () => void }) 
 
   return (
     <div className={`overlay${open ? " open" : ""}`} onMouseDown={e => { if (e.target === e.currentTarget) close(); }}>
-      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="m-title">
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="m-title" ref={boxRef}
+        onKeyDown={e => { if (e.key === "Enter" && (e.target as HTMLElement).tagName === "INPUT" && !busy) void confirm(); }}>
         <h2 id="m-title">{spec.title}</h2>
         <div className="modal-body">{spec.body}</div>
         <div className="modal-actions">
@@ -135,9 +138,11 @@ export function Shell({ children }: { children: ReactNode }) {
                 </Fragment>
               ))}
             </div>
-            <button className="btn primary" onClick={() => toast("The campaign builder is the next piece to build.", "info")}>
-              <Icon name="plus" />New campaign
-            </button>
+            {pathname !== "/campaigns/new" && (
+              <Link className="btn primary" href="/campaigns/new" style={{ textDecoration: "none" }}>
+                <Icon name="plus" />New campaign
+              </Link>
+            )}
           </header>
           {children}
         </div>

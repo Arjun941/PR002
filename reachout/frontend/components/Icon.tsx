@@ -14,6 +14,11 @@ const ICONS = {
   mic: <><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v4"/></>,
   type: <path d="M4 7V4h16v3M9 20h6M12 4v16"/>,
   lock: <><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></>,
+  play: <path d="m7 4 13 8-13 8V4z"/>,
+  pause: <path d="M8 4v16M16 4v16"/>,
+  alert: <><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></>,
+  upload: <><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5M12 3v12"/></>,
+  wand: <><path d="m15 4-1 1 5 5 1-1a2.8 2.8 0 0 0-4-4z"/><path d="M14 5 3 16l5 5L19 10"/></>,
 };
 export type IconName = keyof typeof ICONS;
 

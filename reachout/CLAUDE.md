@@ -30,10 +30,43 @@ reminders). Telephony is Exotel (access provided at kickoff).
 
 ## Current state
 
-- Phase 0 done: FastAPI mock API in `backend/main.py`, Next.js (App Router, TypeScript) dashboard in
-  `frontend/`, proxying `/api` to FastAPI (converted from vanilla JS). Response shapes are the contract real data must fill in, so avoid changing
+- Phase 0 done: FastAPI API in `backend/main.py`, Next.js (App Router, TypeScript) dashboard in
+  `frontend/`, proxying `/api` to FastAPI. Response shapes are the contract, so avoid changing
   them without updating `frontend/lib/types.ts` and the pages.
-- Demo simulator (`DEMO_LIVE`) must be removed or made opt-in once real calls exist.
+- Data lives in SQLite (`backend/store.py`, stdlib only). Demo data is opt-in: `DEMO=1` seeds sample
+  campaigns into an empty DB and simulates calls for campaigns flagged `simulated` (`backend/demo.py`).
+- Phase 4: builder API in `backend/builder.py`, drafting in `backend/llm.py` (Ollama / Sarvam / built-in
+  templates; non-English template output is flagged as an English placeholder), rates and estimate in
+  `backend/costs.py`, UI at `frontend/app/campaigns/new`. Launch is refused unless the dialer is ready
+  (Exotel + `PUBLIC_URL` + `WEBHOOK_TOKEN`) or `DEMO=1`.
+- Phase 5: `backend/dialer.py` places calls (concurrency, `CALL_WINDOW`, retry policy, pause on
+  auth/network errors) and handles `POST /api/telephony/status`; the voicebot saves DTMF 1/2/3 by
+  call sid. Answered with no digit = voicemail. `backend/recordings.py`: PIN-unlocked 15-minute
+  session cookie, audio proxied through the server, every unlock/play in `access_log`.
+- Sign in with ChatGPT: `backend/chatgpt.py` is a drafting provider that spends the connected account's ChatGPT
+  plan (OAuth + PKCE, loopback redirect to `/auth/callback`, credentials in `CHATGPT_AUTH_FILE`). Fallback
+  when not connected, over the limit or ineligible: Ollama, then Sarvam, then templates (`llm.FALLBACK`), each
+  step shown as a warning. Drafting only (`live=False`): key-4 escalation never uses it. One account per install,
+  shared by all users of that server. This is OpenAI's local/open-source flow; a hosted multi-user deployment
+  needs OpenAI approval. Refresh request, `/models` and SSE event names are UNVERIFIED: test on first sign-in.
+- Dashboard assistant: chat on the Overview page (`frontend/components/AssistantChat.tsx`, `backend/assistant.py`,
+  `POST /api/assistant/chat`) turns a plain-words description into the builder's event form (prefill via
+  sessionStorage). It never creates or launches a campaign: contacts and the script review stay with a human.
+  Uses `llm.run_json`, the same ChatGPT -> Ollama -> Sarvam chain as drafting; 503 if none is available.
+- ElevenLabs is the call voice and the key-4 agent (`backend/elevenlabs.py`). Live campaigns start in
+  status `preparing`: `backend/audio.py` synthesises every script phrase per language and every
+  recipient name once (greeting split around `{name}`), caches PCM16 8 kHz in `AUDIO_DIR`
+  (content-addressed, so repeats are free), then sets `running`. Failure pauses the campaign with a
+  `note`; resume re-runs only what is missing. Only ElevenLabs can launch real calls today; Piper and
+  Sarvam voices are simulation-only until their synthesis is written.
+- `backend/voicebot.py` call flow: intro + menu -> key 1/2/3 saves outcome + goodbye; key 4 bridges the
+  caller to the ElevenLabs agent (signed URL, audio converted 8 kHz <-> agent format, the agent's
+  `record_outcome` client tool saves the outcome with channel `agent`); other keys replay the menu;
+  no key after asking twice -> voicemail message, hang up (status callback marks voicemail). Calls with
+  no campaign audio (the test call) get the Phase 1 tone test. Escalation availability now depends on
+  `ELEVENLABS_AGENT_ID`, not on the drafting model.
+- UNVERIFIED (written from memory): ElevenLabs TTS `output_format=ulaw_8000`, signed-URL endpoint,
+  agent WebSocket event names; Exotel `clear` event; Sarvam/Ollama/Exotel callback formats.
 
 - Phase 1 code: `backend/exotel.py` (REST call via `POST /api/telephony/test-call`), `backend/voicebot.py`
   (`/ws/exotel`: plays tones, reads DTMF back as beeps). Exotel API/event/audio-format details were
@@ -45,14 +78,15 @@ reminders). Telephony is Exotel (access provided at kickoff).
       a WebSocket endpoint (Cloudflare Tunnel for local dev), play a prompt, read a DTMF digit
       back. Do this first: it is the riskiest integration. Check Exotel's audio format and
       whether answering-machine detection is available.
-- [ ] Phase 2: DTMF-first call state machine, pre-synthesised templates, voicemail handling,
-      persistent storage (SQLite) replacing the in-memory mock data.
-- [ ] Phase 3: conversational escalation. Consider Pipecat or LiveKit Agents as the pipeline;
+- [~] Phase 2 (code written with ElevenLabs voice; untested on a real call): DTMF-first call state machine,
+      pre-synthesised templates, voicemail handling, persistent storage (SQLite) replacing the in-memory mock data.
+- [~] Phase 3 (ElevenLabs agent bridge on key 4, untested on a real call): conversational escalation. Consider Pipecat or LiveKit Agents as the pipeline;
       write only the Exotel transport. Sarvam as the default India-hosted provider, Ollama + Piper
       as the local option.
-- [ ] Phase 4: campaign builder (paste event details, pick languages, review drafts, cost estimate
+- [x] Phase 4: campaign builder (paste event details, pick languages, review drafts, cost estimate
       before launch, launch).
-- [ ] Phase 5: dashboard on real data; recording playback behind access control.
+- [~] Phase 5 (code written; real-call path tested only against a mocked Exotel): dashboard on real
+      data; recording playback behind access control.
 - [ ] Phase 6: encryption at rest, retention and auto-delete, access logs, README with the cost
       comparison and architecture.
 
@@ -61,7 +95,8 @@ reminders). Telephony is Exotel (access provided at kickoff).
 - Python 3.11+, FastAPI. Keep dependencies minimal; hackathon time is short.
 - Frontend: Next.js App Router + TypeScript, client components, no UI library. Match the existing dark
   UI tokens in `frontend/app/globals.css`.
-- Secrets (Exotel keys, provider API keys) go in `.env`, never in the repo. Add `.env` to
+- Secrets (Exotel keys, provider API keys) go in `.env`, never in the repo. `backend/__init__.py` loads
+  `.env` before any module reads settings (several read env at import time); real env vars win. Add `.env` to
   `.gitignore` before the first commit.
 - Never log full phone numbers or transcripts at INFO level.
 - Run the app: `uvicorn backend.main:app --reload` (API on :8000) and, in `frontend/`, `npm install` then

@@ -3,3 +3,5 @@ __pycache__/
 .venv/
 *.db
 recordings/
+chatgpt_auth.json*
+audio/
