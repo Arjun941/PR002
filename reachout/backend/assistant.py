@@ -4,7 +4,7 @@ the builder, where contacts are added and a human reviews every script before an
 It keeps asking until every required field for the campaign type is known (checked here, not
 trusted from the model); the dashboard then drafts the scripts in the chosen languages.
 
-Uses the same model chain as drafting (ChatGPT plan, then Ollama, then Sarvam). With none of
+Uses the same model chain as drafting (Gemini). With none of
 them available it says so instead of guessing. Model output is treated as untrusted: it is
 clamped to the Event schema and the known languages before it reaches the browser.
 """
@@ -18,7 +18,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from . import llm
+from . import catalog, llm
 from .builder import KINDS
 from .store import LANGUAGES
 
@@ -104,10 +104,9 @@ def chat(body: ChatReq):
     if body.messages[-1].role != "user":
         raise HTTPException(400, "The last message must be from the user")
     msgs = [{"role": "system", "content": _system()}] + [t.model_dump() for t in body.messages]
-    raw, used, warnings = llm.run_json(msgs, "chatgpt")
+    raw, used, warnings = llm.run_json(msgs, catalog.default())
     if used == "template":
-        raise HTTPException(503, "No model is available for the assistant. Connect ChatGPT in the assistant bar, "
-                                 "or configure Ollama or Sarvam in .env. " + " ".join(warnings))
+        raise HTTPException(503, "No model is available for the assistant: set GEMINI_API_KEY in .env. " + " ".join(warnings))
     event, langs, missing = _clean(raw)
     reply = str(raw.get("reply") or "").strip()[:600]
     if missing and (raw.get("ready") or not reply):
@@ -119,4 +118,4 @@ def chat(body: ChatReq):
             "missing": [{"key": f, "label": LABELS[f]} for f in missing],
             # Fields the model wrote beyond the user's words (descriptions, not facts): shown for review.
             "suggested": [f for f in ("title", "details") if f in (raw.get("suggested") or []) and event[f]],
-            "provider": llm.TEXT_PROVIDERS[used]["label"], "provider_key": used, "warnings": warnings}
+            "provider": catalog.label(used), "provider_key": used, "warnings": warnings}

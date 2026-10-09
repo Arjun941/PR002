@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0b0d10">
+<title>Reachout Phone</title>
+<style>
+  :root { --bg:#0b0d10; --panel:#14171c; --line:#232830; --text:#eceff3; --muted:#8a919b; --accent:#4de8b2; --red:#ff5d5d; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 16px system-ui, -apple-system, sans-serif; }
+  body { display: flex; justify-content: center; }
+  .phone { width: 100%; max-width: 420px; height: 100dvh; display: flex; flex-direction: column;
+           padding: env(safe-area-inset-top) 20px calc(env(safe-area-inset-bottom) + 16px); }
+  .screen { display: none; flex: 1; flex-direction: column; }
+  .screen.on { display: flex; }
+  .status { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; color: var(--muted); font-size: 13px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
+  .dot.ok { background: var(--accent); } .dot.bad { background: var(--red); }
+  button { font: inherit; color: inherit; border: 0; cursor: pointer; }
+
+  #number { text-align: center; font-size: 32px; min-height: 48px; margin: 24px 0 8px; letter-spacing: 1px; word-break: break-all; }
+  .contact { text-align: center; color: var(--muted); min-height: 20px; }
+  .idle-msg { text-align: center; color: var(--muted); margin: 12px 0 0; line-height: 1.5; font-size: 14px; }
+  .pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px 18px; margin: auto 0 18px; padding: 0 8px; }
+  .key { aspect-ratio: 1.25; border-radius: 999px; background: var(--panel); font-size: 28px; display: flex; flex-direction: column;
+         align-items: center; justify-content: center; line-height: 1; }
+  .key small { font-size: 10px; color: var(--muted); letter-spacing: 2px; margin-top: 4px; min-height: 10px; }
+  .key:active { background: #1d2127; }
+  .row { display: grid; grid-template-columns: repeat(3, 1fr); align-items: center; justify-items: center; padding: 0 8px; margin-bottom: 8px; }
+  .del { color: var(--muted); font-size: 24px; background: none; width: 56px; height: 56px; }
+  svg { width: 30px; height: 30px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+  .who { text-align: center; margin-top: 40px; }
+  .avatar { width: 96px; height: 96px; border-radius: 50%; background: linear-gradient(135deg,#2b3a35,#18211f); margin: 0 auto 16px;
+            display: grid; place-items: center; font-size: 36px; position: relative; }
+  .avatar.speaking::after, .avatar.ring::after { content:""; position:absolute; inset:-8px; border-radius:50%; border:2px solid var(--accent); opacity:.6; animation: pulse 1.2s infinite; }
+  @keyframes pulse { from { transform: scale(.95); opacity:.7 } to { transform: scale(1.12); opacity:0 } }
+  .name { font-size: 24px; } .timer, .sub { color: var(--muted); margin-top: 6px; font-size: 14px; font-variant-numeric: tabular-nums; }
+  .chip { display: inline-block; padding: 2px 10px; border-radius: 99px; background: var(--panel); border: 1px solid var(--line); color: var(--muted); font-size: 12px; margin: 10px 3px 0; }
+  .spacer { flex: 1; }
+  #meter { height: 4px; border-radius: 2px; background: var(--panel); overflow: hidden; margin-bottom: 14px; }
+  #meter i { display: block; height: 100%; width: 0; background: var(--accent); }
+  .actions { display: flex; justify-content: center; gap: 36px; padding-bottom: 12px; }
+  #dtmf { margin: 0 0 12px; } #dtmf[hidden] { display: none; } #dtmf .key { aspect-ratio: 1.6; font-size: 24px; }
+  .round { width: 72px; height: 72px; border-radius: 50%; background: var(--panel); display: grid; place-items: center; }
+  .round.on { background: var(--text); color: #000; }
+  .red { background: var(--red); color: #fff; } .green { background: var(--accent); color: #04130d; }
+
+  .field { margin: 10px 0; } label { display: block; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+  input { width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; }
+  .btn { padding: 12px 16px; border-radius: 10px; background: var(--accent); color: #04130d; font-weight: 600; width: 100%; margin-top: 12px; }
+  .link { background: none; color: var(--muted); font-size: 13px; }
+  p.note { color: var(--muted); font-size: 13px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="phone">
+
+  <section class="screen on" id="dial">
+    <div class="status"><span><i class="dot" id="srv-dot"></i><span id="srv-text">not connected</span></span><button class="link" id="open-set">Settings</button></div>
+    <div id="number"></div>
+    <div class="contact">Waiting for a campaign call</div>
+    <p class="idle-msg">Keep this page open. When a Reachout campaign calls, this phone rings and the campaign's provider talks to you.</p>
+    <div class="pad" id="pad"></div>
+    <div class="row"><span></span><span></span><button class="del" id="del" aria-label="Delete">&#9003;</button></div>
+  </section>
+
+  <section class="screen" id="ringing">
+    <div class="status"><span>Incoming call</span><span id="r-provider"></span></div>
+    <div class="who">
+      <div class="avatar ring">&#9742;</div>
+      <div class="name" id="r-who">-</div>
+      <div class="sub" id="r-campaign"></div>
+      <div><span class="chip" id="r-lang"></span></div>
+    </div>
+    <div class="spacer"></div>
+    <div class="actions" style="padding-bottom:24px">
+      <button class="round red" id="decline" aria-label="Decline"><svg viewBox="0 0 24 24" style="transform:rotate(135deg)"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.9.7 2.8a2 2 0 0 1-.4 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg></button>
+      <button class="round green" id="answer" aria-label="Answer"><svg viewBox="0 0 24 24"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.9.7 2.8a2 2 0 0 1-.4 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg></button>
+    </div>
+  </section>
+
+  <section class="screen" id="incall">
+    <div class="status"><span id="c-provider"></span><span id="c-campaign"></span></div>
+    <div class="who">
+      <div class="avatar" id="avatar">&#9742;</div>
+      <div class="name" id="c-who">-</div>
+      <div class="timer" id="timer">00:00</div>
+    </div>
+    <div class="spacer"></div>
+    <div class="pad" id="dtmf" hidden></div>
+    <div id="meter"><i></i></div>
+    <div class="actions">
+      <button class="round" id="keys" aria-label="Keypad"><svg viewBox="0 0 24 24"><circle cx="6" cy="5" r="1.5"/><circle cx="12" cy="5" r="1.5"/><circle cx="18" cy="5" r="1.5"/><circle cx="6" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18" cy="12" r="1.5"/><circle cx="6" cy="19" r="1.5"/><circle cx="12" cy="19" r="1.5"/><circle cx="18" cy="19" r="1.5"/></svg></button>
+      <button class="round" id="mute" aria-label="Mute"><svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v4"/></svg></button>
+      <button class="round red" id="end" aria-label="End call"><svg viewBox="0 0 24 24" style="transform:rotate(135deg)"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.9.7 2.8a2 2 0 0 1-.4 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg></button>
+    </div>
+  </section>
+
+  <section class="screen" id="settings">
+    <div class="status"><span>Settings</span><button class="link" id="close-set">Done</button></div>
+    <p class="note">The phone connects to your Reachout backend over the tunnel. Open the link printed at setup (it fills these in), or paste the tunnel address and token.</p>
+    <div class="field"><label for="srv">Server (wss:// address)</label><input id="srv" placeholder="wss://example.trycloudflare.com" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
+    <div class="field"><label for="tok">Access token</label><input id="tok" placeholder="token" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
+    <button class="btn" id="save">Save</button>
+  </section>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const LETTERS = { 2:'ABC',3:'DEF',4:'GHI',5:'JKL',6:'MNO',7:'PQRS',8:'TUV',9:'WXYZ',0:'+' };
+const store = { get: k => { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
+                set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+
+// config: #server=wss://...&token=... in the URL wins, then saved values; on /phone the page's own host is the server
+(() => {
+  const h = new URLSearchParams(location.hash.slice(1));
+  if (h.get('server')) store.set('server', h.get('server'));
+  if (h.get('token')) store.set('token', h.get('token'));
+  if (h.get('server') || h.get('token')) history.replaceState(null, '', location.pathname);
+})();
+if (location.pathname === '/phone') store.set('server', (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
+$('srv').value = store.get('server'); $('tok').value = store.get('token');
+const show = id => document.querySelectorAll('.screen').forEach(s => s.classList.toggle('on', s.id === id));
+
+// idle keypad (decoration: campaign calls come to this phone)
+let digits = '';
+const paint = () => { $('number').textContent = digits; };
+['1','2','3','4','5','6','7','8','9','*','0','#'].forEach(k => {
+  const b = document.createElement('button'); b.className = 'key';
+  b.innerHTML = `${k}<small>${LETTERS[k] || ''}</small>`;
+  b.onclick = () => { if (digits.length < 15) { digits += k; paint(); } };
+  $('pad').appendChild(b);
+});
+$('del').onclick = () => { digits = digits.slice(0, -1); paint(); };
+$('open-set').onclick = () => show('settings');
+$('close-set').onclick = () => show('dial');
+$('save').onclick = () => { store.set('server', $('srv').value.trim()); store.set('token', $('tok').value.trim()); show('dial'); reconnect(); };
+
+// ringtone
+let ringCtx, ringTimer;
+function startRing() {
+  stopRing();
+  try {
+    ringCtx = ringCtx || new (window.AudioContext || window.webkitAudioContext)(); ringCtx.resume();
+    const beep = () => [0, 0.45].forEach(d => {
+      const o = ringCtx.createOscillator(), g = ringCtx.createGain();
+      o.frequency.value = 440 + (d ? 40 : 0); g.gain.value = 0.08; o.connect(g); g.connect(ringCtx.destination);
+      o.start(ringCtx.currentTime + d); o.stop(ringCtx.currentTime + d + 0.35);
+    });
+    beep(); ringTimer = setInterval(beep, 2000);
+  } catch {}
+}
+function stopRing() { clearInterval(ringTimer); ringTimer = null; }
+document.addEventListener('pointerdown', () => { try { ringCtx = ringCtx || new (window.AudioContext || window.webkitAudioContext)(); ringCtx.resume(); } catch {} }, { once: true });
+
+// connection to the Reachout backend, kept open so campaigns can ring it
+let ws, retry = 0, ringing = null;
+function connect() {
+  const srv = store.get('server').replace(/\/+$/, '');
+  if (!srv) { $('srv-dot').className = 'dot'; $('srv-text').textContent = 'not connected'; show('settings'); return; }
+  $('srv-dot').className = 'dot'; $('srv-text').textContent = retry ? 'reconnecting...' : 'connecting...';
+  const mine = ws = new WebSocket(`${srv}/ws/phone?token=${encodeURIComponent(store.get('token'))}`);
+  mine.binaryType = 'arraybuffer';
+  mine.onmessage = e => {
+    if (e.data instanceof ArrayBuffer) return play(e.data);
+    const m = JSON.parse(e.data);
+    if (m.type === 'registered') { retry = 0; $('srv-dot').className = 'dot ok'; $('srv-text').textContent = 'online, waiting for calls'; }
+    else if (m.type === 'incoming') incoming(m);
+    else if (m.type === 'clear') flush();
+    else if (m.type === 'ended') endCall(false);
+  };
+  mine.onclose = () => {
+    if (mine !== ws) return;
+    $('srv-dot').className = 'dot bad'; $('srv-text').textContent = 'server unreachable, retrying';
+    if (!store.get('token') && retry >= 1) { $('srv-text').textContent = 'token needed'; show('settings'); }
+    if (ringing) { stopRing(); ringing = null; show('dial'); }
+    endCall(false); retry++; setTimeout(() => { if (mine === ws) connect(); }, Math.min(1000 * retry, 5000));
+  };
+}
+function reconnect() { const old = ws; ws = null; try { old && old.close(); } catch {} retry = 0; connect(); }
+
+function incoming(m) {
+  ringing = m;
+  $('r-who').textContent = m.recipient; $('r-campaign').textContent = m.campaign; $('r-lang').textContent = m.language;
+  $('r-provider').textContent = m.provider; show('ringing'); startRing();
+  if (navigator.vibrate) navigator.vibrate([300, 150, 300]);
+}
+$('decline').onclick = () => { stopRing(); ws.send(JSON.stringify({ type: 'decline' })); ringing = null; show('dial'); };
+
+const workletSrc = `class P extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = new Float32Array(320); this.n = 0; }
+  process(inputs) {
+    const ch = inputs[0][0]; if (!ch) return true;
+    for (let i = 0; i < ch.length; i++) {
+      this.buf[this.n++] = ch[i];
+      if (this.n === 320) {
+        const pcm = new Int16Array(320); let peak = 0;
+        for (let j = 0; j < 320; j++) { const s = Math.max(-1, Math.min(1, this.buf[j])); pcm[j] = s * 32767; peak = Math.max(peak, Math.abs(s)); }
+        this.port.postMessage({ pcm: pcm.buffer, peak }, [pcm.buffer]);
+        this.n = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('p', P);`;
+
+let ctx, playCtx, stream, node, playAt = 0, sources = [], muted = false, ticker, t0, speakTimer;
+$('answer').onclick = async () => {
+  stopRing(); const call = ringing; ringing = null;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+  } catch (e) { ws.send(JSON.stringify({ type: 'decline' })); show('dial'); $('srv-text').textContent = 'microphone blocked'; return; }
+  ctx = new AudioContext({ sampleRate: 16000 }); playCtx = new AudioContext(); playAt = 0;
+  await Promise.all([ctx.resume(), playCtx.resume()]);
+  await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([workletSrc], { type: 'text/javascript' })));
+  node = new AudioWorkletNode(ctx, 'p'); ctx.createMediaStreamSource(stream).connect(node);
+  node.port.onmessage = e => {
+    $('meter').firstElementChild.style.width = muted ? '0' : Math.min(100, e.data.peak * 140) + '%';
+    if (ws && ws.readyState === 1 && !muted) ws.send(e.data.pcm);
+  };
+  muted = false; $('mute').classList.remove('on');
+  $('c-who').textContent = call.recipient; $('c-campaign').textContent = call.campaign; $('c-provider').textContent = call.provider;
+  t0 = Date.now(); ticker = setInterval(tick, 500); tick();
+  $('dtmf').hidden = call.mode !== 'hybrid'; $('keys').classList.toggle('on', call.mode === 'hybrid');
+  show('incall'); ws.send(JSON.stringify({ type: 'answer' }));
+};
+const tick = () => { const s = Math.floor((Date.now() - t0) / 1000); $('timer').textContent = `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
+
+// playback: gapless queue, each chunk carries its sample rate
+function play(buf) {
+  if (!playCtx) return;
+  const rate = new DataView(buf).getUint32(0, true), pcm = new Int16Array(buf.slice(4)), f = new Float32Array(pcm.length);
+  for (let i = 0; i < pcm.length; i++) f[i] = pcm[i] / 32768;
+  const ab = playCtx.createBuffer(1, f.length, rate); ab.copyToChannel(f, 0);
+  const src = playCtx.createBufferSource(); src.buffer = ab; src.connect(playCtx.destination);
+  // jitter buffer: when the queue has run dry, start a little ahead so late chunks do not leave gaps
+  if (playAt < playCtx.currentTime + 0.02) playAt = playCtx.currentTime + 0.15;
+  src.start(playAt); playAt += ab.duration;
+  sources.push(src); src.onended = () => { sources = sources.filter(s => s !== src); };
+  $('avatar').classList.add('speaking'); clearTimeout(speakTimer);
+  speakTimer = setTimeout(() => $('avatar').classList.remove('speaking'), (playAt - playCtx.currentTime) * 1000 + 200);
+}
+function flush() { sources.forEach(s => { try { s.stop(); } catch {} }); sources = []; playAt = 0; $('avatar').classList.remove('speaking'); }
+
+function endCall(tell) {
+  if (tell && ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'hangup' }));
+  clearInterval(ticker); flush();
+  stream && stream.getTracks().forEach(t => t.stop()); ctx && ctx.close(); playCtx && playCtx.close();
+  ctx = playCtx = stream = node = null; stopRing();
+  if ($('incall').classList.contains('on')) show('dial');
+}
+$('end').onclick = () => endCall(true);
+// in-call keypad: hybrid campaigns play an IVR menu answered with keys 1, 2, 3
+['1','2','3','4','5','6','7','8','9','*','0','#'].forEach(k => {
+  const b = document.createElement('button'); b.className = 'key'; b.textContent = k;
+  b.onclick = () => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'dtmf', digit: k })); if (navigator.vibrate) navigator.vibrate(10); };
+  $('dtmf').appendChild(b);
+});
+$('keys').onclick = () => { $('dtmf').hidden = !$('dtmf').hidden; $('keys').classList.toggle('on', !$('dtmf').hidden); };
+$('mute').onclick = () => { muted = !muted; $('mute').classList.toggle('on', muted); };
+
+connect();
+</script>
+</body>
+</html>

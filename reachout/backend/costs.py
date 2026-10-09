@@ -1,7 +1,7 @@
 """Cost model in INR. One place for every rate, so the dashboard's "spent so far" and the
 builder's pre-launch estimate agree.
 
-The rates are placeholders until the first real Exotel and Sarvam bills arrive; calibrate
+The rates are placeholders until the first real Exotel, ElevenLabs and Gemini bills arrive; calibrate
 them here, not in the callers.
 """
 from __future__ import annotations
@@ -13,9 +13,12 @@ import math
 COST = {"answered": 0.7, "agent_extra": 9.0, "unanswered": 0.3}
 RETRY_ESTIMATE_PER_CALL = 0.45
 
-# Sarvam: about ₹15 per 10k characters; ElevenLabs: about $0.22 per 1k characters on the Creator plan.
-TTS_PER_CHAR = {"piper": 0.0, "sarvam": 15 / 10_000, "elevenlabs": 18 / 1_000}
-DRAFT_CALL = {"template": 0.0, "chatgpt": 0.0, "ollama": 0.0, "sarvam": 0.5}  # the single LLM call per campaign
+# Pre-synthesised IVR audio: ElevenLabs about $0.22 per 1k characters on the Creator plan.
+TTS_PER_CHAR = {"elevenlabs": 18 / 1_000}
+DRAFT_CALL = 0.5  # the single LLM call per campaign (script text plus the agent prompt)
+# A full live conversation, per minute: ElevenLabs agents about $0.10, Gemini Live roughly a third of that.
+LIVE_PER_MIN = {"elevenlabs": 9.0, "gemini": 3.0}
+WEB_CALL_MINUTES = 2  # a web phone call is a live conversation start to finish
 
 CHARS_PER_SEC = 14       # spoken rate used to turn script length into call length
 KEYPRESS_SEC = 6         # time to listen and press a key
@@ -41,36 +44,42 @@ def _spoken(s: dict, fields=SPOKEN) -> int:
 
 
 def estimate(*, kind: str, by_language: dict[str, int], scripts: dict[str, dict], max_attempts: int,
-             escalation: bool, voice: str, text: str, questions: int = 0, avg_name_chars: float = 8) -> dict:
-    """Expected campaign cost before launch, with the assumptions shown to the user."""
+             provider: str, mode: str, questions: int = 0, avg_name_chars: float = 8) -> dict:
+    """Expected campaign cost before launch, with the assumptions shown to the user. No telephony charge:
+    calls go to the phone page."""
     p = PICKUP.get(kind, .6)
     m = max(1, max_attempts)
     attempts_each = sum((1 - p) ** k for k in range(m))
     answered_each = 1 - (1 - p) ** m
     n = sum(by_language.values())
+    answered = n * answered_each
+    rate = LIVE_PER_MIN.get(provider, 9.0)
+    all_live = answered * WEB_CALL_MINUTES * rate
 
-    telephony = synth_chars = 0.0
-    longest = 0.0
+    synth_chars = 0.0
+    seconds = 0.0
     for lang, count in by_language.items():
         s = scripts.get(lang, {})
-        seconds = _spoken(s) / CHARS_PER_SEC + KEYPRESS_SEC * (1 + questions)  # follow-ups: one key each
-        longest = max(longest, seconds)
-        answered_call = COST["answered"] * max(1, math.ceil(seconds / 60))
-        telephony += count * (answered_each * answered_call + (attempts_each - answered_each) * COST["unanswered"])
+        seconds = max(seconds, _spoken(s) / CHARS_PER_SEC + KEYPRESS_SEC * (1 + questions))
         synth_chars += _spoken(s, (*SPOKEN, "voicemail")) + count * (avg_name_chars + 4)
 
-    answered = n * answered_each
-    agent = answered * ESCALATION_RATE * COST["agent_extra"] if escalation else 0.0
-    synth = synth_chars * TTS_PER_CHAR.get(voice, 0.0)
-    draft = DRAFT_CALL.get(text, 0.0)
-    total = telephony + agent + synth + draft
-
-    lines = [
-        {"label": "Phone calls", "detail": f"About {round(n * attempts_each):,} calls, {round(answered):,} expected to answer", "inr": telephony},
-        {"label": "Voice pre-synthesis", "detail": f"{round(synth_chars):,} characters, once per language plus each name", "inr": synth},
-        {"label": "Assistant escalations", "detail": f"About {ESCALATION_RATE:.0%} of answered calls ask a question at the end" if escalation else "Off: keypad only", "inr": agent},
-        {"label": "Script drafting", "detail": "One language-model call for the whole campaign", "inr": draft},
-    ]
+    if mode == "live":
+        lines = [
+            {"label": "Live conversation", "detail": f"About {WEB_CALL_MINUTES} min per answered call at the provider's live rate", "inr": all_live},
+            {"label": "IVR audio", "detail": "Not used in live mode", "inr": 0.0},
+        ]
+        call_seconds = WEB_CALL_MINUTES * 60
+        total = all_live + DRAFT_CALL
+    else:
+        synth = synth_chars * TTS_PER_CHAR["elevenlabs"]
+        agent = answered * ESCALATION_RATE * rate
+        lines = [
+            {"label": "IVR audio", "detail": f"{round(synth_chars):,} characters, synthesised once per language plus each name", "inr": synth},
+            {"label": "Agent takeovers", "detail": f"About {ESCALATION_RATE:.0%} of answered calls ask a question at the end", "inr": agent},
+        ]
+        call_seconds = round(seconds)
+        total = synth + agent + DRAFT_CALL
+    lines.append({"label": "Script drafting", "detail": "One language-model call for the whole campaign", "inr": DRAFT_CALL})
     return {
         "lines": [l | {"inr": round(l["inr"], 2)} for l in lines],
         "total_inr": round(total, 2),
@@ -78,8 +87,8 @@ def estimate(*, kind: str, by_language: dict[str, int], scripts: dict[str, dict]
         "recipients": n,
         "expected_calls": round(n * attempts_each),
         "expected_answered": round(answered),
-        # The pitch: what the same campaign costs if a full voice agent handled every answered call.
-        "all_agent_inr": round(telephony + synth + draft + answered * COST["agent_extra"], 2),
-        "assumptions": {"pickup": p, "max_attempts": m, "call_seconds": round(longest),
-                        "escalation_rate": ESCALATION_RATE if escalation else 0},
+        # The pitch: what the same campaign costs if the live agent handled every answered call.
+        "all_agent_inr": round(all_live + DRAFT_CALL, 2),
+        "assumptions": {"pickup": p, "max_attempts": m, "call_seconds": call_seconds,
+                        "escalation_rate": ESCALATION_RATE if mode == "hybrid" else 0},
     }

@@ -1,46 +1,59 @@
-"""Providers page API: every provider Reachout can use, grouped by job, with what is set up and where
-data goes. Read-only except the connection check for Gemini Live."""
+"""Providers page API: the two providers Reachout can use (ElevenLabs, Gemini), what each can do, what is
+set up and where data goes. A saved default pre-selects the provider for new campaigns; each campaign
+still picks its own. Connection checks make one small real request."""
 from __future__ import annotations
 
 import os
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
-from . import agents, audio, elevenlabs, gemini_live, llm
+from . import catalog, elevenlabs, gemini_live, settings, webphone
 
 router = APIRouter(prefix="/api")
-
-TEXT_SETUP = {"template": "", "chatgpt": "Connect on the New campaign page", "ollama": "OLLAMA_MODEL (and OLLAMA_URL)",
-              "sarvam": "SARVAM_API_KEY"}
-VOICE_SETUP = {"piper": "Not wired up yet", "sarvam": "Not wired up yet", "elevenlabs": "ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID"}
-
-
-def _item(key, p, available, setup, **extra):
-    return {"key": key, "label": p["label"], "region": p["region"], "sends": p["sends"], "available": available,
-            "setup": "" if available else setup, **extra}
 
 
 @router.get("/providers")
 def providers():
-    default_agent = agents.default()
-    return {"groups": [
-        {"key": "live", "title": "Live voice assistant",
-         "help": "Answers callers who ask a question at the end of the call. The only part of a call that runs a live voice model, so it is the part that costs.",
-         "items": [_item(k, v, agents.ready(k), v["setup"], default=k == default_agent and agents.ready(k),
-                         model=gemini_live.model() if k == "gemini" else None, checkable=k == "gemini")
-                   for k, v in agents.PROVIDERS.items()]},
-        {"key": "voice", "title": "Call audio",
-         "help": "Speaks the campaign script. Scripts are synthesised once per language, before the campaign starts.",
-         "items": [_item(k, v, audio.ready(k), VOICE_SETUP.get(k, "")) for k, v in llm.VOICE_PROVIDERS.items()]},
-        {"key": "text", "title": "Script drafting",
-         "help": "Writes the scripts in every language with one call per campaign. A person reviews them before launch.",
-         "items": [_item(k, v, llm.available(k), TEXT_SETUP.get(k, ""), live=llm.live(k))
-                   for k, v in llm.TEXT_PROVIDERS.items()]},
-    ]}
+    default = catalog.default()
+    items = []
+    for key in catalog.ORDER:
+        p = catalog.PROVIDERS[key]
+        items.append({
+            "key": key, "label": p["label"], "region": p["region"], "sends": p["sends"],
+            "default": key == default, "available": catalog.available(key),
+            "model": gemini_live.model() if key == "gemini" else None,
+            "caps": [{"key": cap, "label": catalog.CAP_LABELS[cap], "supported": catalog.supports(key, cap),
+                      "ready": catalog.ready(key, cap), "missing": catalog.missing(key, cap)} for cap in p["caps"]],
+        })
+    return {"providers": items, "default": default,
+            "webphone": {"connected": webphone.connected(), "path": "/phone", "token_required": bool(os.getenv("PHONE_TOKEN"))}}
 
 
-@router.post("/providers/gemini/check")
-async def check_gemini():
-    if not gemini_live.ready():
-        raise HTTPException(400, "GEMINI_API_KEY is not set")
-    return await gemini_live.check()
+class DefaultReq(BaseModel):
+    provider: str
+
+
+@router.put("/providers/default")
+def set_default(body: DefaultReq):
+    if body.provider not in catalog.PROVIDERS:
+        raise HTTPException(400, "Unknown provider")
+    if not catalog.available(body.provider):
+        raise HTTPException(400, f"{catalog.label(body.provider)} is not set up yet")
+    settings.save(default_provider=body.provider)
+    return {"default": body.provider}
+
+
+@router.post("/providers/{key}/check")
+async def check(key: str):
+    if key not in catalog.PROVIDERS:
+        raise HTTPException(404, "Unknown provider")
+    if not catalog.ready(key, "live"):
+        raise HTTPException(400, f"Set {', '.join(catalog.missing(key, 'live'))} first")
+    if key == "gemini":
+        return await gemini_live.check()
+    try:
+        await elevenlabs._signed_url()
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: could not get a conversation link for the agent"}
+    return {"ok": True}

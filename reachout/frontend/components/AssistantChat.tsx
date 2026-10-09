@@ -3,7 +3,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { api, post } from "@/lib/api";
 import { KIND } from "@/lib/format";
-import { PREFILL_KEY, type AssistantReply, type ChatGPTStatus, type Draft, type Prefill } from "@/lib/types";
+import { PREFILL_KEY, type AssistantReply, type Draft, type Prefill, type ProviderKey } from "@/lib/types";
 import { useData } from "@/components/hooks";
 import { Icon } from "@/components/Icon";
 import { useShell } from "@/components/Shell";
@@ -15,6 +15,8 @@ const GREETING: Turn = {
   role: "assistant",
   content: "Tell me about the event, e.g. “Greenfield School parent-teacher meeting on 18 October at 10 am in the main hall, in Hindi and English.” I'll ask for anything missing, then write the call scripts in your languages.",
 };
+
+const asProvider = (k: string): ProviderKey => (k === "elevenlabs" ? "elevenlabs" : "gemini");
 
 /** Floating assistant bar at the bottom of every page (the builder has its own form, so it hides there). */
 export function AssistantChat() {
@@ -28,16 +30,14 @@ export function AssistantChat() {
   const [last, setLast] = useState<AssistantReply | null>(null);
   const [scripts, setScripts] = useState<{ draft: Draft; warnings: string[] } | null>(null);
   const [drafting, setDrafting] = useState(false);
-  const [linking, setLinking] = useState(false);
   const log = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
-  const { data: gpt, retry } = useData(() => api<ChatGPTStatus>("/auth/chatgpt"), []);
   const { data: voiceOpts } = useData(() => api<{ server: ServerSTT[] }>("/assistant/voice"), []);
   const [speechLang, setSpeechLang] = useSpeechLang();
   const [voiceNote, setVoiceNote] = useState("");
   const voiced = useRef(false);
   // Speaking is another way to type: the transcript lands in the box to check and correct, then Send
-  // (ChatGPT reads any language). It is never sent on its own, so a misheard word can be fixed first.
+  // It is never sent on its own, so a misheard word can be fixed first.
   const voice = useVoice({
     lang: speechLang, server: voiceOpts?.server ?? [],
     onText: (t, where) => {
@@ -50,18 +50,6 @@ export function AssistantChat() {
     onError: msg => toast(msg, "error"),
   });
   const listening = voice.state === "listening";
-
-  // Back from the ChatGPT sign-in: say how it went once, then clean the address bar.
-  useEffect(() => {
-    const q = new URLSearchParams(window.location.search);
-    const result = q.get("chatgpt");
-    if (!result || window.location.pathname.startsWith("/campaigns/new")) return;  // the builder reports its own
-    if (result === "connected") toast("ChatGPT connected");
-    else toast(q.get("reason") || "ChatGPT sign-in failed", "error");
-    setOpen(true);
-    window.history.replaceState(null, "", window.location.pathname);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   useEffect(() => { log.current?.scrollTo({ top: log.current.scrollHeight }); }, [turns, busy, drafting, open]);
   useEffect(() => {
@@ -76,26 +64,12 @@ export function AssistantChat() {
   const ready = last?.ready && last.event ? last as Ready : null;
   const say = (content: string) => setTurns(p => [...p, { role: "assistant", content }]);
 
-  const connect = async () => {
-    setLinking(true);
-    try {
-      const r = await post<{ url: string }>("/auth/chatgpt/start", { next: "/overview" });
-      window.location.href = r.url;
-    } catch (e) { toast((e as Error).message, "error"); setLinking(false); }
-  };
-  const disconnect = async () => {
-    setLinking(true);
-    try { await post("/auth/chatgpt/disconnect"); retry(); }
-    catch (e) { toast((e as Error).message, "error"); }
-    finally { setLinking(false); }
-  };
-
   // Everything required is known: the same AI writes the scripts in the chosen languages (one call per campaign).
   const writeScripts = async (r: Ready) => {
     setDrafting(true);
     try {
       const res = await post<{ draft: Draft; warnings: string[] }>("/builder/draft",
-        { event: r.event, languages: r.languages, text_provider: r.provider_key, escalation: false });
+        { event: r.event, languages: r.languages, provider: asProvider(r.provider_key), mode: "hybrid" });
       setScripts(res);
       say(`Scripts written in ${r.language_names.join(", ")}. Open the builder to add contacts and review every line before anyone is called.`);
     } catch (e) {
@@ -123,7 +97,7 @@ export function AssistantChat() {
   };
 
   const openBuilder = (r: Ready) => {
-    const prefill: Prefill = { event: r.event, languages: r.languages, text_provider: r.provider_key,
+    const prefill: Prefill = { event: r.event, languages: r.languages, provider: asProvider(r.provider_key),
       draft: scripts?.draft, warnings: scripts?.warnings };
     try { sessionStorage.setItem(PREFILL_KEY, JSON.stringify(prefill)); } catch { /* private mode: the form just starts empty */ }
     setOpen(false); setTurns([GREETING]); setLast(null); setScripts(null);
@@ -144,23 +118,6 @@ export function AssistantChat() {
               <button className="btn sm ghost" aria-label="Minimise assistant" onClick={() => setOpen(false)}><Icon name="minus" size={14} /></button>
             </div>
           </div>
-          {gpt && (
-            <div className="chat-conn">
-              {gpt.connected ? (
-                <>
-                  <span>Using the ChatGPT plan of <b>{gpt.email ?? "the connected account"}</b>. If it runs out, other configured models take over.</span>
-                  <button className="btn sm" disabled={linking} onClick={() => void disconnect()}>Disconnect</button>
-                </>
-              ) : (
-                <>
-                  <span>Connect ChatGPT so the assistant runs on your plan (Plus or Pro). Otherwise it uses Ollama or Sarvam if configured.</span>
-                  <button className="btn primary sm" disabled={linking} onClick={() => void connect()}>
-                    {linking && <span className="spinner" />}Connect ChatGPT
-                  </button>
-                </>
-              )}
-            </div>
-          )}
           {voiceNote && <div className="voice-note"><Icon name="mic" size={14} />{voiceNote}</div>}
           <div className="chat-log" ref={log} aria-live="polite">
             {turns.map((t, i) => (

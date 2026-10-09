@@ -39,46 +39,49 @@ export interface Detail extends Summary {
   by_language: Group[]; by_segment: Group[];
   handling: { audio: Handling; text: Handling; recordings: Handling };
   retry_estimate_inr: number; retry_policy: RetryPolicy; note: string | null;
-  scripts: (Script & { language: string })[];
+  provider: ProviderKey; mode: Mode; voice: string; system_prompt: string;
+  ivr: Record<string, Record<string, boolean>>; synthesising: boolean;
+  scripts: (Script & { language: string; code: string })[];
   questions: QuestionResult[];
   recipients: Recipient[];
 }
 
 // Campaign builder
 export type Kind = "seminar" | "clinic" | "school" | "payment";
-export type TextProvider = "template" | "chatgpt" | "ollama" | "sarvam";
-export type VoiceProvider = "piper" | "sarvam" | "elevenlabs";
-export interface Provider { key: string; label: string; region: string; sends: string; available?: boolean; live?: boolean }
-export interface AgentProvider { key: string; label: string; region: string; sends: string; setup: string; available: boolean }
-export interface ProviderItem {
-  key: string; label: string; region: string; sends: string; available: boolean; setup: string;
-  default?: boolean; model?: string | null; checkable?: boolean; live?: boolean;
+export type ProviderKey = "elevenlabs" | "gemini";
+export type Mode = "live" | "hybrid";
+export interface Cap { supported: boolean; ready: boolean; missing: string[] }
+export interface BuilderProvider {
+  key: ProviderKey; label: string; region: string; sends: string; caps: { draft: Cap; voice: Cap; live: Cap };
 }
-export interface ProviderGroup { key: string; title: string; help: string; items: ProviderItem[] }
-export interface GeminiCheck { ok: boolean; model: string; connect_ms?: number; first_audio_ms?: number; error?: string }
-export interface ChatGPTStatus { connected: boolean; email: string | null; redirect_uri: string }
+export interface ProviderItem {
+  key: ProviderKey; label: string; region: string; sends: string; default: boolean; available: boolean; model: string | null;
+  caps: (Cap & { key: string; label: string })[];
+}
+export interface ProvidersInfo {
+  providers: ProviderItem[]; default: ProviderKey;
+  webphone: { connected: number; path: string; token_required: boolean };
+}
+export interface ProviderCheck { ok: boolean; model?: string; connect_ms?: number; first_audio_ms?: number; error?: string }
 export interface BuilderOptions {
   languages: { code: string; name: string }[];
   kinds: { value: Kind; label: string }[];
-  text_providers: Provider[]; voice_providers: Provider[]; chatgpt: ChatGPTStatus;
-  escalation: { available: boolean; label: string; sends: string };
-  agent_providers: AgentProvider[]; default_agent: string;
-  launch_mode: "live" | "simulated" | "unavailable";
-  call_window: string;
+  providers: BuilderProvider[]; default_provider: ProviderKey;
+  phones: number;
 }
 export const PREFILL_KEY = "reachout.prefill";
 export interface AssistantReply {
   reply: string; ready: boolean; event: EventDetails | null; languages: string[]; language_names: string[];
-  missing: { key: string; label: string }[]; suggested: ("title" | "details")[]; provider: string; provider_key: TextProvider; warnings: string[];
+  missing: { key: string; label: string }[]; suggested: ("title" | "details")[]; provider: string; provider_key: string; warnings: string[];
 }
 /** Handed from the assistant to the builder through sessionStorage. */
 export interface Prefill {
-  event: EventDetails; languages: string[]; text_provider?: TextProvider; draft?: Draft; warnings?: string[];
+  event: EventDetails; languages: string[]; provider?: ProviderKey; draft?: Draft; warnings?: string[];
 }
 export interface EventDetails { org: string; kind: Kind; title: string; date: string; time: string; venue: string; details: string }
 export interface Draft {
   name: string; scripts: Record<string, Script & { placeholder: boolean }>; questions: Question[]; retry: RetryPolicy;
-  notes: string; provider: TextProvider;
+  notes: string; provider: string; system_prompt: string;
 }
 export interface ContactsCheck {
   count: number; by_language: Record<string, number>; segments: Record<string, number>;

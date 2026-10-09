@@ -11,7 +11,7 @@ uvicorn backend.main:app --reload        # API on :8000
 cd frontend && npm install && npm run dev  # dashboard on :3000
 ```
 
-Data is stored in SQLite (`reachout.db`). To try it without Exotel, start the API with `DEMO=1`:
+Data is stored in SQLite (`reachout.db`). To try it with sample data, start the API with `DEMO=1`:
 it seeds sample campaigns into an empty database and simulates calls, including for campaigns you
 launch from the builder. Copy `.env.example` to `.env` for real calls, script drafting and recording
 playback; the backend loads `.env` itself on startup (restart it after editing `.env`).
@@ -20,7 +20,7 @@ playback; the backend loads `.env` itself on startup (restart it after editing `
 
 - `backend/main.py`: dashboard API (`/api/overview`, `/api/campaigns`, `/api/campaigns/{id}`, retry, pause/resume).
 - `backend/builder.py`, `llm.py`, `costs.py`: campaign builder (one drafting call per campaign, cost estimate, launch).
-- `backend/dialer.py`: places calls and records results from Exotel's status callback.
+- `backend/dialer.py`: rings the phone page (`/phone`) for running campaigns; `webphone.py` runs the call.
 - `backend/recordings.py`: PIN-protected recording playback with an access log.
 - `backend/store.py`, `demo.py`: SQLite storage and the opt-in demo data.
 - `frontend/`: Next.js (App Router, TypeScript) dashboard; `/api` is proxied to the backend via `next.config.mjs`.

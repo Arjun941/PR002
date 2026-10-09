@@ -5,10 +5,11 @@ import { api, post } from "@/lib/api";
 import { fmt, KIND } from "@/lib/format";
 import {
   PREFILL_KEY, SCRIPT_FIELDS, questionText, type Prefill, type Question, type BuilderOptions, type ContactsCheck, type Draft, type Estimate, type EventDetails,
-  type Script, type TextProvider, type VoiceProvider,
+  type Mode, type ProviderKey, type Script,
 } from "@/lib/types";
 import { useData } from "@/components/hooks";
 import { Icon } from "@/components/Icon";
+import { Listen } from "@/components/Listen";
 import { useCrumbs, useShell } from "@/components/Shell";
 import { QuestionsEditor } from "@/components/QuestionsEditor";
 import { ErrorView, HandlingCard, Notice, PageHead, Skeleton } from "@/components/ui";
@@ -37,11 +38,8 @@ export default function NewCampaignPage() {
   const [step, setStep] = useState(0);
   const [ev, setEv] = useState<EventDetails>(EMPTY_EVENT);
   const [langs, setLangs] = useState<string[]>(["en"]);
-  const [textP, setTextP] = useState<TextProvider>("template");
-  const [voiceP, setVoiceP] = useState<VoiceProvider>("piper");
-  const [escalation, setEscalation] = useState(false);
-  const [agentP, setAgentP] = useState("");
-  const [record, setRecord] = useState(false);
+  const [provider, setProvider] = useState<ProviderKey | "">("");
+  const [mode, setMode] = useState<Mode>("hybrid");
   const [csv, setCsv] = useState("");
   const [check, setCheck] = useState<{ key: string; res: ContactsCheck } | null>(null);
   const [draft, setDraft] = useState<{ key: string; d: Draft; warnings: string[] } | null>(null);
@@ -49,17 +47,12 @@ export default function NewCampaignPage() {
   const [tab, setTab] = useState("en");
   const [est, setEst] = useState<{ key: string; e: Estimate } | null>(null);
   const [reviewed, setReviewed] = useState(false);
-  const [busy, setBusy] = useState<"" | "draft" | "contacts" | "chatgpt">("");
+  const [busy, setBusy] = useState<"" | "draft" | "contacts">("");
 
-  // Prefer a configured model (templates are the fallback) and a voice that can make real calls.
-  // An assistant hand-off keeps the model that wrote its scripts, so the draft is not marked stale.
+  // Start on the saved default provider (an assistant hand-off keeps its own pick).
   const prefilledModel = useRef(false);
   useEffect(() => {
-    const best = opts?.text_providers.find(p => p.key !== "template" && p.available);
-    if (best && !prefilledModel.current) setTextP(best.key as TextProvider);
-    const voice = opts?.voice_providers.find(p => p.available);
-    if (voice) setVoiceP(voice.key as VoiceProvider);
-    if (opts) setAgentP(a => a || opts.default_agent);
+    if (opts && !prefilledModel.current) setProvider(p => p || opts.default_provider);
   }, [opts]);
 
   // Event described to the dashboard assistant: fill the form once, the person still reviews everything.
@@ -73,10 +66,10 @@ export default function NewCampaignPage() {
       const languages = p.languages?.length ? p.languages : ["en"];
       setEv(event);
       setLangs(languages);
-      if (p.text_provider) { prefilledModel.current = true; setTextP(p.text_provider); }
-      if (p.draft && p.text_provider) {
-        // Keyed exactly like a draft made here (escalation starts off), so editing the event still flags it stale.
-        setDraft({ key: JSON.stringify([event, languages, p.text_provider, false]), d: p.draft, warnings: p.warnings ?? [] });
+      if (p.provider) { prefilledModel.current = true; setProvider(p.provider); }
+      if (p.draft) {
+        // Keyed exactly like a draft made here, so editing the event still flags it stale.
+        setDraft({ key: JSON.stringify([event, languages, "hybrid"]), d: p.draft, warnings: p.warnings ?? [] });
         setName(p.draft.name);
         setTab(languages[0]);
       }
@@ -86,30 +79,22 @@ export default function NewCampaignPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Back from the ChatGPT sign-in: show the result once, then clean the address bar.
-  useEffect(() => {
-    const q = new URLSearchParams(window.location.search);
-    const result = q.get("chatgpt");
-    if (!result) return;
-    if (result === "connected") toast("ChatGPT connected");
-    else toast(q.get("reason") || "ChatGPT sign-in failed", "error");
-    window.history.replaceState(null, "", window.location.pathname);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const draftKey = JSON.stringify([ev, langs, textP, escalation]);
+  const draftKey = JSON.stringify([ev, langs, mode]);
   const contactsKey = JSON.stringify([csv, langs]);
   const d = draft?.d;
   const contacts = check?.key === contactsKey ? check.res : null;
   const questions = d?.questions ?? [];
-  const asks = escalation && !!opts?.escalation.available;  // the call ends with "any other questions?"
+  const prov = opts?.providers.find(p => p.key === provider);
+  const hybrid = mode === "hybrid";
+  // Hybrid calls end with "any other questions?", answered live by the provider.
+  const asks = hybrid && !!prov?.caps.live.ready;
   const scriptsBody = d ? Object.fromEntries(langs.filter(l => d.scripts[l]).map(l =>
     [l, { ...Object.fromEntries(SCRIPT_FIELDS.map(f => [f, d.scripts[l][f]])),
       questions: Object.fromEntries(questions.map(q => [q.id, d.scripts[l].questions?.[q.id] ?? ""])),
       ...(asks ? { doubts: d.scripts[l].doubts ?? "" } : {}) }])) : {};
   const estBody = d && contacts ? {
     kind: ev.kind, by_language: contacts.by_language, scripts: scriptsBody, retry: d.retry, questions,
-    escalation, record, voice_provider: voiceP, text_provider: textP, agent_provider: agentP,
+    provider, mode,
   } : null;
   const estKey = JSON.stringify(estBody);
 
@@ -127,10 +112,9 @@ export default function NewCampaignPage() {
   if (!opts) return <main className="view"><Skeleton /></main>;
 
   const langName = (c: string) => opts.languages.find(l => l.code === c)?.name ?? c;
-  const provider = opts.text_providers.find(p => p.key === textP)!;
-  const chosenAgent = opts.agent_providers.find(p => p.key === agentP);
+  const voiceReady = opts.providers.some(p => p.caps.voice.ready);  // IVR audio is always ElevenLabs
+  const unusable = !prov || !prov.caps.live.ready || (hybrid && !voiceReady);
   const estimate = est?.key === estKey ? est.e : null;
-
   const ok = [
     !!ev.title.trim() && langs.length > 0,
     !!contacts && contacts.count > 0 && contacts.error_count === 0,
@@ -157,26 +141,15 @@ export default function NewCampaignPage() {
     finally { setBusy(""); }
   };
 
-  const connectChatGPT = async () => {
-    setBusy("chatgpt");
-    try {
-      const r = await post<{ url: string }>("/auth/chatgpt/start");
-      window.location.href = r.url; // the form resets on return; the sign-in is a full-page trip
-    } catch (e) { toast((e as Error).message, "error"); setBusy(""); }
-  };
-
-  const disconnectChatGPT = async () => {
-    setBusy("chatgpt");
-    try { await post("/auth/chatgpt/disconnect"); setTextP("template"); retry(); }
-    catch (e) { toast((e as Error).message, "error"); }
-    finally { setBusy(""); }
-  };
+  const preview = (language: string, text: string) => fetch("/api/builder/preview-audio", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider, language, text }),
+  });
 
   const makeDraft = async () => {
     setBusy("draft");
     try {
       const r = await post<{ draft: Draft; warnings: string[] }>("/builder/draft",
-        { event: ev, languages: langs, text_provider: textP, escalation, agent_provider: agentP });
+        { event: ev, languages: langs, provider, mode });
       setDraft({ key: draftKey, d: r.draft, warnings: r.warnings });
       setName(r.draft.name);
       setTab(langs[0]);
@@ -188,6 +161,7 @@ export default function NewCampaignPage() {
   const editScript = (l: string, f: (typeof SCRIPT_FIELDS)[number], v: string) => setDraft(p => p && {
     ...p, d: { ...p.d, scripts: { ...p.d.scripts, [l]: { ...p.d.scripts[l], [f]: v, placeholder: false } } },
   });
+  const editPrompt = (v: string) => setDraft(p => p && { ...p, d: { ...p.d, system_prompt: v } });
   const editQuestionText = (l: string, id: string, v: string) => setDraft(p => p && {
     ...p, d: { ...p.d, scripts: { ...p.d.scripts, [l]: { ...p.d.scripts[l], questions: { ...p.d.scripts[l].questions, [id]: v } } } },
   });
@@ -219,16 +193,17 @@ export default function NewCampaignPage() {
 
   const launch = () => {
     if (!d || !contacts || !estimate) return;
-    const live = opts.launch_mode === "live";
     modal({
-      title: live ? "Start calling?" : "Start a simulated campaign?",
+      title: "Start calling?",
       body: (
         <>
-          {live
-            ? `Calls start now and run only within calling hours (${opts.call_window}). You can pause at any time.`
-            : "Demo mode: no real calls are placed. Outcomes are simulated so you can watch the dashboard fill in."}
+          {hybrid
+            ? `The IVR audio is made first (the campaign shows “Preparing”), then the phone rings for one person at a time. Callers with a question at the end are taken over by ${prov!.label}.`
+            : `The phone rings for one person at a time, now, and ${prov!.label} holds the whole conversation.`}
+          {" "}{opts.phones ? "A phone page is open and ready." : "No phone page is open yet: open /phone on a device, or the campaign waits."}
           <dl className="facts">
             <div><dt>Recipients</dt><dd>{fmt.int(contacts.count)}</dd></div>
+            <div><dt>Provider</dt><dd>{prov!.label}, {hybrid ? "hybrid" : "live"} mode</dd></div>
             <div><dt>Languages</dt><dd>{langs.map(langName).join(", ")}</dd></div>
             <div><dt>Retries</dt><dd>Up to {d.retry.max_attempts} attempts, {d.retry.gap_hours} h apart</dd></div>
             <div><dt>Follow-up questions</dt><dd>{questions.length ? questions.map(q => q.label).join(", ") : "None"}</dd></div>
@@ -236,13 +211,13 @@ export default function NewCampaignPage() {
           </dl>
         </>
       ),
-      confirmLabel: live ? `Call ${fmt.int(contacts.count)} people` : "Start simulation",
+      confirmLabel: `Call ${fmt.int(contacts.count)} people`,
       onConfirm: async () => {
         const r = await post<{ id: string; mode: string }>("/campaigns", {
-          name: name.trim(), event: ev, languages: langs, text_provider: textP, voice_provider: voiceP,
-          escalation, agent_provider: agentP, record, contacts_csv: csv, scripts: scriptsBody, questions, retry: d.retry, reviewed,
+          name: name.trim(), event: ev, languages: langs, provider, mode, system_prompt: d.system_prompt,
+          contacts_csv: csv, scripts: scriptsBody, questions, retry: d.retry, reviewed,
         });
-        toast(r.mode === "live" ? "Campaign launched" : "Simulated campaign started");
+        toast(hybrid ? "Campaign created: making the IVR audio" : "Campaign launched");
         router.push(`/campaigns/${r.id}`);
       },
     });
@@ -300,72 +275,37 @@ export default function NewCampaignPage() {
             </div>
             <span className="hint">Each language gets its own script. Each contact hears the language set in the list.</span>
           </div>
-          <div className="field"><span className="label">Who drafts the scripts</span>
+          <div className="field"><span className="label">Provider</span>
             <div className="choices">
-              {opts.text_providers.map(p => (
-                <button key={p.key} className={`choice${textP === p.key ? " on" : ""}`} disabled={!p.available}
-                  aria-pressed={textP === p.key} onClick={() => setTextP(p.key as TextProvider)}>
-                  <b>{p.label}{!p.available && <em>Not configured</em>}</b><small>{p.sends}</small>
-                </button>
-              ))}
-            </div>
-            <div className="toggles" style={{ marginTop: 8 }}>
-              {opts.chatgpt.connected ? (
-                <>
-                  <span className="hint">Drafts use the ChatGPT plan of {opts.chatgpt.email ?? "the connected account"}, shared by everyone using this server.
-                    If it is unavailable or out of allowance, drafting falls back to the other models, then the templates.</span>
-                  <button className="btn sm" disabled={busy === "chatgpt"} onClick={() => void disconnectChatGPT()}>Disconnect ChatGPT</button>
-                </>
-              ) : (
-                <>
-                  <button className="btn" disabled={busy === "chatgpt"} onClick={() => void connectChatGPT()}>
-                    {busy === "chatgpt" && <span className="spinner" />}Connect ChatGPT
-                  </button>
-                  <span className="hint">Needs a ChatGPT Plus or Pro plan. Opens OpenAI to sign in; open this dashboard on the machine that runs the server.
-                    Without it, drafting uses the other models or the templates.</span>
-                </>
-              )}
-            </div>
-          </div>
-          <div className="field"><span className="label">Who voices the calls</span>
-            <div className="choices">
-              {opts.voice_providers.map(p => {
-                const off = !p.available && opts.launch_mode === "live";  // simulations need no audio
+              {opts.providers.map(p => {
+                const off = !p.caps.live.ready && !p.caps.voice.ready;
                 return (
-                  <button key={p.key} className={`choice${voiceP === p.key ? " on" : ""}`} aria-pressed={voiceP === p.key}
-                    disabled={off} onClick={() => setVoiceP(p.key as VoiceProvider)}>
-                    <b>{p.label}{!p.available && <em>{p.key === "elevenlabs" ? "Not configured" : "Simulation only"}</em>}</b>
+                  <button key={p.key} className={`choice${provider === p.key ? " on" : ""}`} disabled={off}
+                    aria-pressed={provider === p.key} onClick={() => setProvider(p.key)}>
+                    <b>{p.label}{off && <em>Not configured</em>}{p.key === opts.default_provider && !off && <em>Default</em>}</b>
                     <small>{p.sends}</small>
+                    <small>{[p.caps.live.ready && "Live conversation", p.caps.voice.ready && "Makes the IVR audio",
+                      p.caps.draft.ready ? "Writes scripts" : "Scripts written by Gemini"].filter(Boolean).join(" · ")}</small>
                   </button>
                 );
               })}
             </div>
-            <span className="hint">Scripts are synthesised once per language before calls start, plus each recipient&apos;s name.
-              {voiceP === "elevenlabs" && " The campaign shows “Preparing voice” until that is done."}</span>
+            <span className="hint">One provider runs the campaign. Add keys in .env to turn others on; see the Providers page.</span>
           </div>
-          <label className="check">
-            <input type="checkbox" checked={escalation && opts.escalation.available} disabled={!opts.escalation.available}
-              onChange={e => setEscalation(e.target.checked)} />
-            <span>End by asking for any other questions; a live voice assistant answers them
-              <small>{!opts.escalation.available ? "Set GEMINI_API_KEY (Gemini Live), or the ElevenLabs agent keys, to turn this on."
-                : `Only callers who start asking something reach it, and those calls cost more. ${chosenAgent?.sends ?? opts.escalation.sends}.`}</small></span>
-          </label>
-          {escalation && opts.escalation.available && (
-            <div className="field"><span className="label">Which assistant answers</span>
-              <div className="choices">
-                {opts.agent_providers.map(p => (
-                  <button key={p.key} className={`choice${agentP === p.key ? " on" : ""}`} disabled={!p.available}
-                    aria-pressed={agentP === p.key} onClick={() => setAgentP(p.key)}>
-                    <b>{p.label}{!p.available && <em>Not configured</em>}</b><small>{p.sends}</small>
-                  </button>
-                ))}
-              </div>
+          <div className="field"><span className="label">Mode</span>
+            <div className="choices">
+              <button className={`choice${hybrid ? " on" : ""}`} aria-pressed={hybrid} onClick={() => setMode("hybrid")}>
+                <b>Hybrid{!voiceReady && <em>ElevenLabs not set up</em>}</b>
+                <small>Pre-synthesised IVR (always ElevenLabs voice) with the keypad: greeting, message, menu and follow-up questions. It then asks if they
+                  have any further questions, and the agent takes over only if they do. Cheapest per call.</small>
+              </button>
+              <button className={`choice${!hybrid ? " on" : ""}`} aria-pressed={!hybrid} onClick={() => setMode("live")}>
+                <b>Live</b>
+                <small>The agent takes over the whole call and talks it through with them. Most natural, costs the most.</small>
+              </button>
             </div>
-          )}
-          <label className="check">
-            <input type="checkbox" checked={record} onChange={e => setRecord(e.target.checked)} />
-            <span>Record calls<small>Recordings are personal data. Playback needs a PIN and every play is logged.</small></span>
-          </label>
+            <span className="hint">Calls ring the phone page (/phone): {opts.phones ? `${opts.phones} online now.` : "none online yet."}</span>
+          </div>
         </section>
       )}
 
@@ -429,10 +369,10 @@ export default function NewCampaignPage() {
       {step === 2 && (!d ? (
         <section className="card empty">
           <h2>Draft every script in one go</h2>
-          <p>{provider.label} writes the greeting, message, keypad menu, voicemail and goodbye in{" "}
-            {langs.map(langName).join(", ")}, picks the follow-up questions this event needs (food preference, T-shirt
-            size and so on, or none), and suggests a retry policy. One call for the whole campaign; you review everything before launch.</p>
-          <p className="muted" style={{ marginTop: 6, fontSize: 13 }}>{provider.sends}.</p>
+          <p>{prov?.caps.draft.ready ? prov.label : "Gemini"} writes the greeting, message, keypad menu, voicemail and goodbye in{" "}
+            {langs.map(langName).join(", ")}, the agent&apos;s system prompt, the follow-up questions this event needs (food preference,
+            T-shirt size and so on, or none), and a retry policy. One call for the whole campaign; you review everything before launch.</p>
+          {prov && !prov.caps.draft.ready && <p className="muted" style={{ marginTop: 6, fontSize: 13 }}>{prov.label} cannot write text, so Gemini drafts and {prov.label} runs the calls.</p>}
           <p style={{ marginTop: 16 }}>
             <button className="btn primary" disabled={busy === "draft"} onClick={() => void makeDraft()}>
               {busy === "draft" ? <><span className="spinner" />Drafting</> : <><Icon name="wand" />Draft scripts</>}
@@ -445,7 +385,7 @@ export default function NewCampaignPage() {
           <div className="stack-gap">
             {draft!.key !== draftKey && (
               <Notice>
-                The event details, languages or model changed after this draft. Redraft, or edit the scripts by hand.{" "}
+                The event details, languages or closing question changed after this draft. Redraft, or edit the scripts by hand.{" "}
                 <button className="btn sm" disabled={busy === "draft"} onClick={() => void makeDraft()}>
                   {busy === "draft" ? <span className="spinner" /> : <Icon name="refresh" size={14} />}Redraft
                 </button>
@@ -472,9 +412,23 @@ export default function NewCampaignPage() {
               </div>
             </div>
           </section>
-          <QuestionsEditor questions={questions} onChange={setQuestions} escalation={escalation && opts.escalation.available}
+          <section className="card form">
+            <div className="card-head"><h2>Agent system prompt</h2></div>
+            <div className="field">
+              <textarea id="sysprompt" className="input mono" rows={12} maxLength={6000} value={d.system_prompt} spellCheck={false}
+                aria-label="Agent system prompt" onChange={e => editPrompt(e.target.value)} />
+              <span className="hint">Written for this campaign. {prov?.label ?? "The provider"} gets it on every call, together with the event
+                facts, the approved script in each person&apos;s language and the follow-up questions. {"{name}"} and {"{language}"} are filled in per person.
+                Edit freely, or redraft to have it written again.</span>
+            </div>
+          </section>
+          <QuestionsEditor questions={questions} onChange={setQuestions} escalation={asks}
             payment={ev.kind === "payment"} />
           <section className="card">
+            <div className="card-head"><h2>{hybrid ? "IVR responses" : "Approved script"}</h2>
+              <span className="muted" style={{ fontSize: 13 }}>{hybrid
+                ? "Synthesised when you launch. Listen to any line to check how it sounds."
+                : "The agent says these in its own words; it keeps the facts."}</span></div>
             <div className="tabs" role="tablist">
               {langs.map(l => (
                 <button key={l} role="tab" aria-selected={tab === l} className={tab === l ? "on" : ""} onClick={() => setTab(l)}>
@@ -485,14 +439,20 @@ export default function NewCampaignPage() {
             {d.scripts[tab] ? (
               <div className="form">
                 {SCRIPT_FIELDS.map(f => (
-                  <div className="field" key={f}><label htmlFor={`s-${f}`}>{FIELD[f][0]}</label>
+                  <div className="field" key={f}>
+                    <label htmlFor={`s-${f}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      {FIELD[f][0]}{hybrid && <Listen disabled={!voiceReady || !d.scripts[tab][f].trim()} load={() => preview(tab, d.scripts[tab][f])} />}
+                    </label>
                     <textarea id={`s-${f}`} className="input" rows={FIELD[f][2]} value={d.scripts[tab][f]}
                       onChange={e => editScript(tab, f, e.target.value)} lang={tab} />
                     {FIELD[f][1] && <span className="hint">{FIELD[f][1]}</span>}
                   </div>
                 ))}
                 {asks && (
-                  <div className="field"><label htmlFor="s-doubts">Closing question</label>
+                  <div className="field">
+                    <label htmlFor="s-doubts" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      Closing question<Listen disabled={!voiceReady || !d.scripts[tab].doubts?.trim()} load={() => preview(tab, d.scripts[tab].doubts ?? "")} />
+                    </label>
                     <textarea id="s-doubts" className="input" rows={2} lang={tab} value={d.scripts[tab].doubts ?? ""}
                       onChange={e => setDraft(p => p && { ...p, d: { ...p.d, scripts: { ...p.d.scripts, [tab]: { ...p.d.scripts[tab], doubts: e.target.value } } } })} />
                     <span className="hint">Asked last. A caller who starts speaking is connected to the assistant.
@@ -500,7 +460,11 @@ export default function NewCampaignPage() {
                   </div>
                 )}
                 {questions.map((q, i) => (
-                  <div className="field" key={q.id}><label htmlFor={`s-${q.id}`}>Question {i + 1}: {q.label || "untitled"}</label>
+                  <div className="field" key={q.id}>
+                    <label htmlFor={`s-${q.id}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      Question {i + 1}: {q.label || "untitled"}
+                      {hybrid && <Listen disabled={!voiceReady || !d.scripts[tab].questions?.[q.id]?.trim()} load={() => preview(tab, d.scripts[tab].questions?.[q.id] ?? "")} />}
+                    </label>
                     <textarea id={`s-${q.id}`} className="input" rows={2} lang={tab} value={d.scripts[tab].questions?.[q.id] ?? ""}
                       onChange={e => editQuestionText(tab, q.id, e.target.value)} />
                     <span className="hint">Read out every option with its key: {q.options.map((o, k) => `${k + 1} ${o || "…"}`).join(", ")}.</span>
@@ -535,7 +499,7 @@ export default function NewCampaignPage() {
                 <div><dt>Languages</dt><dd>{langs.map(langName).join(", ")}</dd></div>
                 <div><dt>Retries</dt><dd>Up to {d.retry.max_attempts} attempts, {d.retry.gap_hours} h apart</dd></div>
                 <div><dt>Expected answers</dt><dd>{fmt.int(estimate.expected_answered)} of {fmt.int(estimate.recipients)}</dd></div>
-                <div><dt>Calling hours</dt><dd>{opts.call_window}</dd></div>
+                <div><dt>Provider</dt><dd>{prov?.label}, {hybrid ? "hybrid" : "live"} mode</dd></div>
               </dl>
               <p className="muted" style={{ padding: "0 16px 16px", fontSize: 12 }}>
                 Assumes {fmt.pct(estimate.assumptions.pickup)} pick up per attempt and calls of about {estimate.assumptions.call_seconds} s.
@@ -549,10 +513,11 @@ export default function NewCampaignPage() {
               <Notice>{placeholders.map(langName).join(", ")} still {placeholders.length > 1 ? "use" : "uses"} the English placeholder.
                 Those recipients will hear English unless you edit the script.</Notice>
             )}
-            {opts.launch_mode === "simulated" && <Notice kind="info">Demo mode: launching simulates calls. Nobody is phoned.</Notice>}
-            {opts.launch_mode === "unavailable" && (
-              <Notice>Calling is not set up. Configure Exotel, PUBLIC_URL and WEBHOOK_TOKEN in .env, or start the server with DEMO=1 to simulate.</Notice>
+            {!opts.phones && (
+              <Notice kind="info">No phone is online. Open <b>/phone</b> on a phone or another tab; the campaign waits for one.</Notice>
             )}
+            {unusable && <Notice>{!prov ? "Pick a provider." : !prov.caps.live.ready ? `${prov.label} is not set up for live calls.`
+              : `${prov.label} is fine for the call, but IVR audio is made with ElevenLabs: set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID.`}</Notice>}
           </div>
           <section className="card form">
             <label className="check">
@@ -572,8 +537,8 @@ export default function NewCampaignPage() {
             {busy === "contacts" && <span className="spinner" />}Next: {STEPS[step + 1]}
           </button>
         ) : (
-          <button className="btn primary" disabled={!reviewed || !estimate || opts.launch_mode === "unavailable"} onClick={launch}>
-            <Icon name="phone" />{opts.launch_mode === "simulated" ? "Launch simulation" : "Launch"}
+          <button className="btn primary" disabled={!reviewed || !estimate || unusable} onClick={launch}>
+            <Icon name="phone" />Launch
           </button>
         )}
       </div>

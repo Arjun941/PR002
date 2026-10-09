@@ -42,6 +42,7 @@ requeue = _s.requeue
 pause_preparing = _s.pause_preparing
 finish_audio = _s.finish_audio
 set_note = _s.set_note
+update_campaign = _s.update_campaign
 expire_stale = _s.expire_stale
 claim_due = _s.claim_due
 set_call_sid = _s.set_call_sid

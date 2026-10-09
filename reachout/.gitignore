@@ -5,3 +5,4 @@ __pycache__/
 recordings/
 chatgpt_auth.json*
 audio/
+settings.json

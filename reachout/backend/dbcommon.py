@@ -7,7 +7,12 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
-from .exotel import mask
+
+
+def mask(number: str) -> str:
+    """Never log or return a full phone number."""
+    digits = number.strip()
+    return digits[:3] + "•" * max(len(digits) - 5, 0) + digits[-2:] if len(digits) > 5 else "•••"
 
 LANGUAGES = {"en": "English", "hi": "Hindi", "mr": "Marathi", "ta": "Tamil", "kn": "Kannada",
              "ml": "Malayalam"}

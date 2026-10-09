@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import io
+import math
+import struct
 import os
 import secrets
 import time
@@ -19,8 +21,15 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from . import exotel, store
-from .voicebot import SAMPLE_RATE, tone
+from . import store
+
+SAMPLE_RATE = 8000
+
+
+def tone(freq: float, ms: int, gap_ms: int = 0) -> bytes:
+    n = SAMPLE_RATE * ms // 1000
+    pcm = b"".join(struct.pack("<h", int(8000 * math.sin(2 * math.pi * freq * i / SAMPLE_RATE))) for i in range(n))
+    return pcm + b"\x00\x00" * (SAMPLE_RATE * gap_ms // 1000)
 
 router = APIRouter()
 
@@ -105,11 +114,9 @@ async def play(rid: str, request: Request):
     host = urlparse(url).hostname or ""
     if urlparse(url).scheme != "https":
         raise HTTPException(502, "Recording URL is not https")
-    # Only Exotel's own hosts get our API credentials; recordings on S3 links are fetched without them.
-    auth = exotel.auth() if exotel.configured() and (host == "exotel.com" or host.endswith((".exotel.com", ".exotel.in"))) else None
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        resp = await client.get(url, auth=auth)
+        resp = await client.get(url)
     if resp.status_code != 200:
-        raise HTTPException(502, "Could not fetch the recording from Exotel")
+        raise HTTPException(502, "Could not fetch the recording")
     return Response(resp.content, media_type=resp.headers.get("content-type", "audio/mpeg"),
                     headers={"Cache-Control": "no-store"})

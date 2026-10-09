@@ -146,12 +146,19 @@ async def _signed_url() -> str:
 
 async def bridge(recv: Callable[[], Awaitable[dict | None]], send_audio: Callable[[bytes], Awaitable[None]],
                  clear: Callable[[], Awaitable[None]], variables: dict[str, str], language: str,
-                 on_outcome: Callable[[str], bool], preroll: bytes = b"") -> None:
+                 on_outcome: Callable[[str], bool], preroll: bytes = b"", *, instructions: str = "", opening: str = "",
+                 questions: list[dict] | None = None, on_answer: Callable[[str, str], bool] | None = None) -> None:
     """Connect the caller to the agent until either side hangs up or AGENT_MAX_SECONDS pass.
     recv() yields Exotel events (None when the call ends); audio is PCM16 8 kHz both ways.
-    preroll: what the caller already said before the agent was connected; it is sent first."""
+    preroll: what the caller already said before the agent was connected; it is sent first.
+    Outbound calls (the web phone) pass the campaign's `instructions` (the system prompt plus the call context)
+    and an `opening` line as per-conversation overrides, and `on_answer` saves follow-up question answers.
+    The agent must allow those overrides (python -m backend.setup_elevenagent turns them on)."""
     init: dict = {"type": "conversation_initiation_client_data", "dynamic_variables": variables}
-    if os.getenv("ELEVENLABS_AGENT_LANGUAGE_OVERRIDE") == "1":  # needs overrides enabled on the agent
+    if instructions:
+        init["conversation_config_override"] = {"agent": {
+            "prompt": {"prompt": instructions}, "first_message": opening, "language": language}}
+    elif os.getenv("ELEVENLABS_AGENT_LANGUAGE_OVERRIDE") == "1":  # needs overrides enabled on the agent
         init["conversation_config_override"] = {"agent": {"language": language}}
     async with connect(await _signed_url(), max_size=None) as agent:
         await agent.send(json.dumps(init))
@@ -186,7 +193,11 @@ async def bridge(recv: Callable[[], Awaitable[dict | None]], send_audio: Callabl
                     await agent.send(json.dumps({"type": "pong", "event_id": m["ping_event"]["event_id"]}))
                 elif t == "client_tool_call":
                     call = m["client_tool_call"]
-                    ok = call.get("tool_name") == "record_outcome" and on_outcome(str(call.get("parameters", {}).get("outcome", "")))
+                    params = call.get("parameters", {})
+                    if call.get("tool_name") == "record_answer" and on_answer:
+                        ok = on_answer(str(params.get("question_id", "")), str(params.get("option_number", "")))
+                    else:
+                        ok = call.get("tool_name") == "record_outcome" and on_outcome(str(params.get("outcome", "")))
                     await agent.send(json.dumps({"type": "client_tool_result", "tool_call_id": call.get("tool_call_id"),
                                                  "result": "saved" if ok else "unknown tool or outcome", "is_error": not ok}))
                 # user_transcript / agent_response carry what was said: never logged at INFO.

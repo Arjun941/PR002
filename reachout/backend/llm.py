@@ -1,10 +1,9 @@
 """Campaign drafting: ONE language-model call per campaign writes every script in every
 language plus a retry policy. A human reviews the result before launch.
 
-Providers are pluggable and each says where text goes. With no model configured the
-built-in templates are used (English only; other languages are marked as placeholders).
-Ollama and Sarvam request/response details were written from memory and are UNVERIFIED;
-check them on the first real run.
+The writing model is Gemini (catalog.drafter picks it from the campaign's provider). With no
+model configured the built-in templates are used (English only; other languages are marked as
+placeholders).
 """
 from __future__ import annotations
 
@@ -15,7 +14,7 @@ import re
 
 import httpx
 
-from . import chatgpt
+from . import callctx, catalog
 from .store import LANGUAGES
 
 log = logging.getLogger("reachout.llm")
@@ -30,33 +29,6 @@ DTMF = [  # fixed by design; the model only words the prompt for it
 ]
 # With the assistant on, the call ends by asking for questions; a caller who starts speaking reaches the agent.
 DOUBTS = "Do you have any other questions? Please ask now and our assistant will help you. Otherwise, you can hang up."
-
-TEXT_PROVIDERS = {
-    "template": dict(label="Built-in templates", region="This machine", sends="Nothing leaves this machine"),
-    # Drafting only (live=False): key-4 assistant calls never run on someone's ChatGPT plan.
-    "chatgpt": dict(label="ChatGPT (connected plan)", region="United States", live=False,
-                    sends="Event details (text) go to OpenAI, USA, and use the connected ChatGPT plan"),
-    "ollama": dict(label="Ollama (local)", region="This machine", sends="Nothing leaves this machine"),
-    "sarvam": dict(label="Sarvam", region="India", sends="Event details (text) go to Sarvam, India"),
-}
-FALLBACK = ["ollama", "sarvam"]  # tried in order, then the templates, when ChatGPT is unavailable
-VOICE_PROVIDERS = {
-    "piper": dict(label="Piper (local)", region="This machine", sends="Stays on this machine"),
-    "sarvam": dict(label="Sarvam", region="India", sends="Processed in India"),
-    "elevenlabs": dict(label="ElevenLabs", region="United States",
-                       sends="Script text and recipient names go to ElevenLabs, USA"),
-}
-
-
-def available(provider: str) -> bool:
-    return {"template": True, "chatgpt": chatgpt.connected(), "ollama": bool(os.getenv("OLLAMA_MODEL")),
-            "sarvam": bool(os.getenv("SARVAM_API_KEY"))}.get(provider, False)
-
-
-def live(provider: str) -> bool:
-    """Whether this provider can answer during a call (escalation), not only draft scripts."""
-    return provider != "template" and TEXT_PROVIDERS[provider].get("live", True)
-
 
 def _when(e: dict) -> str:
     return " at ".join(x for x in (e.get("date", "").strip(), e.get("time", "").strip()) if x)
@@ -100,6 +72,7 @@ def _prompt(e: dict, langs: list[str], escalation: bool) -> list[dict]:
                             "options": ["English option label", "..."]}],
              "scripts": {l: {f: "..." for f in FIELDS} | {"questions": {"q1": "spoken question with every option and its key"}}
                          | ({"doubts": "..."} if escalation else {}) for l in langs},
+             "system_prompt": "instructions for the voice agent that talks to each person",
              "retry": {"max_attempts": 3, "gap_hours": 4}, "notes": "anything the reviewer should check"}
     user = f"""Organisation: {e.get('org') or 'not given'}
 Campaign type: {KIND_LABEL.get(e['kind'], e['kind'])}
@@ -125,6 +98,13 @@ Rules:
   the spoken question for each id, reading out every option with its key in order, e.g. "What would you like for
   lunch? Press 1 for vegetarian, 2 for non-vegetarian."
 - retry: suggest max_attempts (1 to 4) and gap_hours (1 to 48) suited to this campaign type.
+- system_prompt: the instructions for the live voice agent that will phone each person and hold a natural conversation
+  (in English, 120 to 250 words, second person: "You are..."). Cover: who it calls for and why, the tone suited to this
+  kind of call, how the call flows (greet by name, give the key facts briefly, ask for their decision, then any follow-up
+  questions, then invite questions and say goodbye), what it may answer (only the facts above; say someone will follow up
+  when it does not know; never invent dates, prices or promises), and how to behave (short spoken sentences, no lists,
+  stop when interrupted, end politely if asked to stop calling). Use the placeholders {{name}} and {{language}} for the
+  person's name and language, and no others.
 
 Reply with JSON only, in exactly this shape:
 {json.dumps(shape, ensure_ascii=False)}"""
@@ -141,57 +121,45 @@ def _parse(text: str) -> dict:
     return json.loads(text[start:end + 1])
 
 
-def _ollama(messages: list[dict]) -> dict:
-    url = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
-    resp = httpx.post(f"{url}/api/chat", timeout=300, json={
-        "model": os.environ["OLLAMA_MODEL"], "messages": messages, "stream": False,
-        "format": "json", "options": {"temperature": 0.3}})
-    resp.raise_for_status()
-    return _parse(resp.json()["message"]["content"])
-
-
-def _sarvam(messages: list[dict]) -> dict:
-    resp = httpx.post("https://api.sarvam.ai/v1/chat/completions", timeout=120,
-                      headers={"api-subscription-key": os.environ["SARVAM_API_KEY"]},
-                      json={"model": os.getenv("SARVAM_MODEL", "sarvam-m"), "messages": messages, "temperature": 0.3})
-    resp.raise_for_status()
-    return _parse(resp.json()["choices"][0]["message"]["content"])
-
-
-def _chatgpt(messages: list[dict]) -> dict:
-    return _parse(chatgpt.complete(messages))
-
-
-def _why(exc: Exception) -> str:
-    return exc.reason if isinstance(exc, chatgpt.ChatGPTError) else type(exc).__name__
+def _gemini(messages: list[dict]) -> dict:
+    from google import genai
+    from google.genai import types
+    system = "\n".join(m["content"] for m in messages if m["role"] == "system")
+    contents = [types.Content(role="user" if m["role"] == "user" else "model", parts=[types.Part(text=m["content"])])
+                for m in messages if m["role"] != "system"]
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    resp = client.models.generate_content(
+        model=os.getenv("GEMINI_MODEL") or "gemini-3.1-flash-lite", contents=contents,
+        config=types.GenerateContentConfig(system_instruction=system, response_mime_type="application/json", temperature=0.3,
+                                           thinking_config=types.ThinkingConfig(thinking_budget=0)))
+    return _parse(resp.text or "")
 
 
 def run_json(messages: list[dict], requested: str) -> tuple[dict, str, list[str]]:
-    """One model call returning JSON: (reply, provider used, warnings). ChatGPT falls back to the
-    other configured models; with none usable the reply is {} and the provider is "template"."""
+    """One model call returning JSON: (reply, provider that wrote it, warnings). The requested provider writes it
+    if it can; otherwise the first configured one that can; with none usable the reply is {} and the provider is
+    "template". Each step leaves a warning."""
     warnings: list[str] = []
-    raw: dict = {}
-    used = "template"
-    run = {"chatgpt": _chatgpt, "ollama": _ollama, "sarvam": _sarvam}
-    for p in ([requested] + (FALLBACK if requested == "chatgpt" else [])) if requested != "template" else []:
-        label = TEXT_PROVIDERS[p]["label"]
-        if not available(p):
-            warnings.append(f"{label} is not {'connected' if p == 'chatgpt' else 'configured'}.")
-            continue
+    run = {"gemini": _gemini}
+    first = catalog.drafter(requested)
+    if first is None:
+        warnings.append("No writing model is set up (set GEMINI_API_KEY), so the built-in templates were used.")
+        return {}, "template", warnings
+    if first != requested:
+        warnings.append(f"{catalog.label(requested)} cannot write text, so {catalog.label(first)} wrote the drafts.")
+    for p in dict.fromkeys([first, *(k for k in catalog.ORDER if catalog.ready(k, "draft"))]):
         try:
-            raw, used = run[p](messages), p
-            break
-        except Exception as exc:  # network, HTTP or JSON: never block the caller on it
+            return run[p](messages), p, warnings
+        except Exception as exc:  # network, HTTP or JSON: never block the person on it
             log.warning("call via %s failed: %s", p, type(exc).__name__)
-            warnings.append(f"{label} failed ({_why(exc)}).")
-    if requested != "template" and used != requested:
-        warnings.append(f"Used {TEXT_PROVIDERS[used]['label'] if used != 'template' else 'the built-in templates'} instead.")
-    return raw, used, warnings
+            warnings.append(f"{catalog.label(p)} failed ({type(exc).__name__}).")
+    warnings.append("Used the built-in templates instead.")
+    return {}, "template", warnings
 
 
 def draft(e: dict, langs: list[str], provider: str, escalation: bool) -> tuple[dict, list[str]]:
-    """Returns (draft, warnings). ChatGPT falls back to the other configured models, then the
-    templates; any other provider falls back to the templates. Each step leaves a warning."""
+    """Returns (draft, warnings). The chosen provider writes it if it can, else another configured one, else the
+    templates. Each step leaves a warning."""
     base = template(e, escalation)
     raw, provider, warnings = run_json(_prompt(e, langs, escalation), provider)
 
@@ -226,7 +194,7 @@ def draft(e: dict, langs: list[str], provider: str, escalation: bool) -> tuple[d
                     warnings.append(f"{LANGUAGES[l]}: the question “{q['label']}” is in English. Translate it before launch.")
     if placeholders:
         warnings.append(f"{', '.join(placeholders)}: English placeholder text. Translate it before launch, "
-                        "or configure Sarvam or Ollama to draft it.")
+                        "or set GEMINI_API_KEY so a model drafts it.")
     for l, s in scripts.items():
         if "{name}" not in s["greeting"]:
             warnings.append(f"{LANGUAGES[l]} greeting does not use {{name}}.")
@@ -238,8 +206,13 @@ def draft(e: dict, langs: list[str], provider: str, escalation: bool) -> tuple[d
     retry = {"max_attempts": _clamp(r.get("max_attempts"), 1, 4, 2 if e["kind"] == "payment" else 3),
              "gap_hours": _clamp(r.get("gap_hours"), 1, 48, 24 if e["kind"] == "payment" else 4)}
     name = raw.get("name") if isinstance(raw.get("name"), str) and raw["name"].strip() else e["title"]
+    sp = raw.get("system_prompt") if isinstance(raw.get("system_prompt"), str) and len(raw["system_prompt"].strip()) >= 80 else ""
+    if not sp:
+        if provider != "template":
+            warnings.append("The model wrote no usable agent prompt; used the standard one.")
+        sp = callctx.default_system_prompt(e, questions)
     return {"name": name.strip()[:80], "scripts": scripts, "questions": questions, "retry": retry, "dtmf": DTMF,
-            "notes": str(raw.get("notes") or "")[:500], "provider": provider}, warnings
+            "system_prompt": sp.strip()[:4000], "notes": str(raw.get("notes") or "")[:500], "provider": provider}, warnings
 
 
 def _questions(raw) -> tuple[list[dict], dict[str, dict]]:

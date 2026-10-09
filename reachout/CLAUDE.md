@@ -2,7 +2,7 @@
 
 Hackathon project (PR 002): turn a template plus event details into a live multilingual outbound
 calling campaign for institutions (seminars, clinic reminders, school-parent notices, payment
-reminders). Telephony is Exotel (access provided at kickoff).
+reminders). Telephony was Exotel; it was removed for now (2026-10-09, on request) and calls ring a phone page (`/phone`). `exotel.py` and `voicebot.py` are in git history.
 
 ## Design principles (do not drift from these)
 
@@ -17,8 +17,8 @@ reminders). Telephony is Exotel (access provided at kickoff).
    date, venue) are synthesised in a batch before the campaign starts.
 4. Self-hosted orchestrator (laptop, small VPS or institution server). No Vapi-style platform fee.
 5. Providers are pluggable (STT, TTS, LLM), each tagged with region and what leaves the machine
-   (audio, text or nothing). Local models (Piper, Ollama, Whisper) are first-class options,
-   mainly for batch pre-synthesis. Do not rely on CPU Whisper for live calls.
+   (audio, text or nothing). Only ElevenLabs and Gemini are wired up for now (`backend/catalog.py`);
+   add another there. Do not rely on CPU Whisper for live calls.
 6. Contact lists and recordings are personal data: mask phone numbers in API responses, encrypt
    at rest, enforce retention, log access. The UI must show where voice and language processing
    happens for each campaign.
@@ -39,20 +39,14 @@ reminders). Telephony is Exotel (access provided at kickoff).
   `dbcommon.py`). No raw SQL outside `store_sqlite.py`; a new data operation needs both backends. Copy an existing
   SQLite file with `python -m backend.migrate_to_mongo`. Mongo phone numbers are plain text until Phase 6 encryption. Demo data is opt-in: `DEMO=1` seeds sample
   campaigns into an empty DB and simulates calls for campaigns flagged `simulated` (`backend/demo.py`).
-- Phase 4: builder API in `backend/builder.py`, drafting in `backend/llm.py` (Ollama / Sarvam / built-in
+- Phase 4: builder API in `backend/builder.py`, drafting in `backend/llm.py` (Gemini / built-in
   templates; non-English template output is flagged as an English placeholder), rates and estimate in
   `backend/costs.py`, UI at `frontend/app/campaigns/new`. Launch is refused unless the dialer is ready
-  (Exotel + `PUBLIC_URL` + `WEBHOOK_TOKEN`) or `DEMO=1`.
+  (removed with Exotel: campaigns now launch without telephony setup).
 - Phase 5: `backend/dialer.py` places calls (concurrency, `CALL_WINDOW`, retry policy, pause on
   auth/network errors) and handles `POST /api/telephony/status`; the voicebot saves DTMF 1/2/3 by
   call sid. Answered with no digit = voicemail. `backend/recordings.py`: PIN-unlocked 15-minute
   session cookie, audio proxied through the server, every unlock/play in `access_log`.
-- Sign in with ChatGPT: `backend/chatgpt.py` is a drafting provider that spends the connected account's ChatGPT
-  plan (OAuth + PKCE, loopback redirect to `/auth/callback`, credentials in `CHATGPT_AUTH_FILE`). Fallback
-  when not connected, over the limit or ineligible: Ollama, then Sarvam, then templates (`llm.FALLBACK`), each
-  step shown as a warning. Drafting only (`live=False`): the call-time agent never uses it. One account per install,
-  shared by all users of that server. This is OpenAI's local/open-source flow; a hosted multi-user deployment
-  needs OpenAI approval. Refresh request, `/models` and SSE event names are UNVERIFIED: test on first sign-in.
 - Dashboard assistant: floating bar at the bottom of every page except the builder, mounted in `Shell`
   (`frontend/components/AssistantChat.tsx`, `backend/assistant.py`, `POST /api/assistant/chat`). It asks until
   every required field for the campaign type is known: `assistant.REQUIRED` (org, title, date, time, venue,
@@ -61,7 +55,7 @@ reminders). Telephony is Exotel (access provided at kickoff).
   with the same provider to write the scripts in those languages (the campaign's one drafting call) and hands
   event + draft to the builder via sessionStorage (`Prefill`), keyed so later edits mark the draft stale.
   It never creates or launches a campaign: contacts and the script review stay with a human.
-  Uses `llm.run_json`, the same ChatGPT -> Ollama -> Sarvam chain as drafting; 503 if none is available.
+  Uses `llm.run_json`, the same Gemini drafting as campaigns; 503 if no key is set.
 - Voice input in the assistant bar (`frontend/components/voice.ts`): mic + speech-language picker
   (Auto-detect default, or en/hi/mr/ta/kn/ml-IN; remembered per browser, read after mount to avoid hydration
   mismatches). A server speech service is preferred when configured (more accurate for Indian languages, can
@@ -81,8 +75,7 @@ reminders). Telephony is Exotel (access provided at kickoff).
   status `preparing`: `backend/audio.py` synthesises every script phrase per language and every
   recipient name once (greeting split around `{name}`), caches PCM16 8 kHz in `AUDIO_DIR`
   (content-addressed, so repeats are free), then sets `running`. Failure pauses the campaign with a
-  `note`; resume re-runs only what is missing. Only ElevenLabs can launch real calls today; Piper and
-  Sarvam voices are simulation-only until their synthesis is written.
+  `note`; resume re-runs only what is missing. ElevenLabs and Gemini both make IVR audio (`catalog` cap `voice`).
 - `backend/voicebot.py` call flow: intro + menu -> key 1/2/3 saves outcome -> follow-up questions ->
   `_closing`: with the assistant on, play `scripts[lang].doubts` ("any other questions?") and listen
   `DOUBT_WAIT_SECONDS`; `_hear_question` is a loudness check (`VAD_RMS`, 400 ms of speech within 1 s), no
@@ -98,18 +91,33 @@ reminders). Telephony is Exotel (access provided at kickoff).
   test that only sets `REACHOUT_DB` still hits Atlas. Set `MONGODB_URI=` (empty) for SQLite tests, or a
   throwaway `MONGODB_DB` on the local mongod.
 - UNVERIFIED (written from memory): ElevenLabs TTS `output_format=ulaw_8000`, signed-URL endpoint,
-  agent WebSocket event names; Exotel `clear` event; Sarvam/Ollama/Exotel callback formats.
+  agent WebSocket event names; Exotel `clear` event; Exotel callback formats.
 
-- Phase 1 code: `backend/exotel.py` (REST call via `POST /api/telephony/test-call`), `backend/voicebot.py`
-  (`/ws/exotel`: plays tones, reads DTMF back as beeps). Exotel API/event/audio-format details were
-  written from memory and are UNVERIFIED; check them on the first real call. Copy `.env.example` to `.env`.
-
-- The end-of-call question assistant is pluggable (`backend/agents.py`): Gemini Live (`backend/gemini_live.py`, default model
-  gemini-3.8-live, `GEMINI_API_KEY`) or the ElevenLabs agent. Chosen per campaign (`agent_provider`), default via
-  `LIVE_AGENT`. Providers page (`/providers`, `backend/providers.py`) lists every provider and tests Gemini Live.
-  ElevenLabs agent is created by `python -m backend.setup_elevenagent` (writes ELEVENLABS_AGENT_ID/VOICE_ID to .env).
-  Both assistants verified with a fake telephony line; not yet on a real Exotel call. Other Gemini Live models misbehaved in tests
-  (3.1 preview closed sessions with 1011, 2.5 native audio took 7-14 s to reply).
+- Providers (`backend/catalog.py`): exactly ElevenLabs and Gemini. Each declares capabilities with the env vars they need:
+  `draft` (writes scripts + the agent system prompt: Gemini only), `voice` (pre-synthesised IVR audio: ElevenLabs only, whichever provider runs the call; Gemini speech was dropped for its tiny quota) and
+  `live` (the conversation: both). A campaign stores one `provider` (ElevenLabs cannot draft, so Gemini writes its text) and
+  a `mode`, `live` or `hybrid`. Default provider for new campaigns: Providers page -> `settings.json`.
+  Sarvam was written (STT + chat + TTS conversation engine) and removed on request; ask before reviving it.
+- System prompt: the drafting call also writes `system_prompt` (English, `{name}`/`{language}` placeholders); it is shown
+  and editable in the builder and on the campaign page. `backend/callctx.py` builds what a live agent gets per call:
+  the prompt filled for that person + event facts + the approved script in their language + follow-up questions + how to
+  record outcomes. Engines (`gemini_live.bridge`, `elevenlabs.bridge`) take `instructions`, `opening`, `questions`,
+  `on_answer`; ElevenLabs gets them as a per-conversation override (the agent must allow prompt/first_message/language
+  overrides and have the `record_answer` tool: re-run `python -m backend.setup_elevenagent` after changes there).
+- Phone (`backend/webphone.py`, page `backend/static/phone.html`, `/phone` + `WS /ws/phone`): a browser page that rings; the only
+  telephony. `dialer._ring` claims one recipient at a time (no call window; note "Waiting for the phone" when none is online)
+  and `webphone.call` runs the campaign's mode. Audio is 8 kHz telephone quality both ways, noise-gated on the mic.
+  - live mode: `_converse` runs the provider's engine for the whole call; it connects while the phone rings (opening held
+    until answer).
+  - hybrid mode: `_hybrid` + `ivr.py` play the pre-synthesised IVR (greeting+name, message, menu; keys on the page's in-call keypad
+    save the outcome and follow-up answers; voicemail line after two silent menus), then "any other questions?"; speaking hands
+    the call to the provider's live engine with the IVR answer in its instructions.
+  - IVR audio (`audio.py`): synthesised when a hybrid campaign is created (status "preparing"), listened to in the builder
+    (`POST /api/builder/preview-audio`) and on the campaign page ("IVR Responses", Listen buttons, Synthesize/Resynthesize via
+    `POST /api/campaigns/{id}/ivr/synthesize`). Cache is content-addressed per provider+voice+model+text.
+  - Verified: both providers' live calls with a scripted fake page, IVR logic with a fake line (confirm+follow-up, voicemail,
+    replay), preview/synthesise/listen via the API. Not verified: a hybrid call end to end with a person, the hybrid agent
+    takeover, Gemini IVR for a campaign with many names (quota).
 
 ## Roadmap
 
@@ -120,8 +128,7 @@ reminders). Telephony is Exotel (access provided at kickoff).
 - [~] Phase 2 (code written with ElevenLabs voice; untested on a real call): DTMF-first call state machine,
       pre-synthesised templates, voicemail handling, persistent storage (SQLite) replacing the in-memory mock data.
 - [~] Phase 3 (ElevenLabs agent at the end of the call, untested on a real call): conversational escalation. Consider Pipecat or LiveKit Agents as the pipeline;
-      write only the Exotel transport. Sarvam as the default India-hosted provider, Ollama + Piper
-      as the local option.
+      write only the Exotel transport. Providers: ElevenLabs and Gemini (Sarvam postponed).
 - [x] Phase 4: campaign builder (paste event details, pick languages, review drafts, cost estimate
       before launch, launch).
 - [~] Phase 5 (code written; real-call path tested only against a mocked Exotel): dashboard on real

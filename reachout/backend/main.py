@@ -1,7 +1,7 @@
 """Reachout: dashboard API on real data (SQLite).
 
 Campaigns come from the builder (backend/builder.py) and calls are placed by the dialer
-(backend/dialer.py), which records outcomes from Exotel's status callback and the voicebot.
+(backend/dialer.py), which rings the phone page (backend/webphone.py).
 DEMO=1 seeds sample campaigns into an empty database and simulates calls for them; without
 it nothing here is fake.
 
@@ -15,15 +15,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from . import assistant, audio, chatgpt, demo, dialer, exotel, store, stt
-from .builder import DEMO, router as builder_router
+from . import assistant, audio, demo, dialer, store, stt
+from . import catalog
+from .builder import DEMO, MAX_PROMPT, Retry, Script, handling, router as builder_router
 from .costs import RETRY_ESTIMATE_PER_CALL, recipient_cost
 from .providers import router as providers_router
 from .recordings import router as recordings_router
 from .store import ANSWERED, LANGUAGES, NON_RESPONDER, OUTCOMES
-from .voicebot import router as voicebot_router
+from .webphone import router as webphone_router
 
 
 def _totals(recs: list[dict]) -> dict:
@@ -118,12 +119,10 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Reachout", lifespan=lifespan)
-app.include_router(voicebot_router)
 app.include_router(builder_router)
-app.include_router(chatgpt.router)
+app.include_router(webphone_router)
 app.include_router(assistant.router)
 app.include_router(stt.router)
-app.include_router(dialer.router)
 app.include_router(recordings_router)
 app.include_router(providers_router)
 
@@ -156,7 +155,9 @@ def campaign_detail(cid: str):
         "retry_estimate_inr": round(sum(r["outcome"] in NON_RESPONDER for r in recs) * RETRY_ESTIMATE_PER_CALL, 1),
         "retry_policy": c["retry"],
         "note": c["note"],
-        "scripts": [{"language": LANGUAGES.get(l, l)} | s for l, s in c["scripts"].items()],
+        "provider": c["provider"] or c["agent_provider"], "mode": c["mode"], "voice": c["voice"],
+        "system_prompt": c["system_prompt"], "ivr": audio.audio_status(c), "synthesising": cid in audio._active,
+        "scripts": [{"language": LANGUAGES.get(l, l), "code": l} | s for l, s in c["scripts"].items()],
         "questions": _question_results(c["questions"], recs),
         "recipients": [store.public_recipient(r, c["questions"]) for r in recs],
     }
@@ -180,10 +181,63 @@ def change_status(cid: str, body: StatusChange):
     if c["status"] == "completed":
         raise HTTPException(409, "Campaign has already finished")
     status = body.status
-    if status == "running" and not c["simulated"] and not c["audio_ready"]:
-        status = "preparing"
+    if status == "running" and c["note"] and cid not in audio._active:
+        store.set_note(cid, None)  # a stale error note from before
+    if status == "running" and c["mode"] == "hybrid" and not c["simulated"] and not c["audio_ready"]:
+        status = "preparing"  # hybrid calls play pre-synthesised audio: make it first
     store.set_status(cid, status)
     return {"status": status}
+
+
+class CampaignEdit(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=80)
+    provider: Literal["elevenlabs", "gemini"] | None = None
+    system_prompt: str | None = Field(None, min_length=1, max_length=MAX_PROMPT)
+    retry: Retry | None = None
+    scripts: dict[str, Script] | None = None
+
+
+@app.patch("/api/campaigns/{cid}")
+def edit_campaign(cid: str, body: CampaignEdit):
+    """Edit a campaign that is not calling: name, provider, agent system prompt, retry policy and the
+    scripts. Contacts, languages, questions and the mode are fixed once created. New scripts on a hybrid
+    campaign need their audio synthesised again, so it goes back to 'preparing' when resumed."""
+    c = _get(cid)
+    if c["status"] in ("running", "preparing"):
+        raise HTTPException(409, "Pause the campaign before editing it")
+    changes: dict = {}
+    if body.name is not None:
+        changes["name"] = body.name.strip()
+    if body.system_prompt is not None:
+        changes["system_prompt"] = body.system_prompt.strip()
+    if body.retry is not None:
+        changes["retry"] = body.retry.model_dump()
+    if body.provider is not None and body.provider != (c["provider"] or c["agent_provider"]):
+        if not catalog.ready(body.provider, "live"):
+            raise HTTPException(400, f"{catalog.label(body.provider)} is not set up for live calls "
+                                     f"(set {', '.join(catalog.missing(body.provider, 'live'))})")
+        changes |= {"provider": body.provider, "agent_provider": body.provider,
+                    "handling": handling(body.provider, c["mode"], c["voice"] or body.provider)}
+    if body.scripts is not None:
+        if set(body.scripts) != set(c["scripts"]):
+            raise HTTPException(400, "Scripts must cover exactly this campaign's languages")
+        new = {}
+        for lang, sc in body.scripts.items():
+            old = c["scripts"][lang]
+            merged = old | sc.model_dump(exclude={"questions"})
+            texts = old.get("questions", {}) | {k: v for k, v in sc.questions.items() if k in old.get("questions", {})}
+            if any(not texts.get(q["id"], "").strip() for q in c["questions"]):
+                raise HTTPException(400, f"Every follow-up question needs its spoken text ({LANGUAGES.get(lang, lang)})")
+            if c["escalation"] and not merged.get("doubts", "").strip():
+                raise HTTPException(400, f"The closing question is empty ({LANGUAGES.get(lang, lang)})")
+            new[lang] = merged | {"questions": texts}
+        if new != c["scripts"]:
+            changes["scripts"] = new
+            if c["mode"] == "hybrid" and not c["simulated"]:
+                changes["audio_ready"] = False  # resuming re-synthesises only the phrases that changed
+    if changes:
+        store.update_campaign(cid, changes)
+    return {"updated": sorted(changes)}
 
 
 @app.delete("/api/campaigns/{cid}")
@@ -198,13 +252,33 @@ def delete_campaign(cid: str, request: Request):
     return {"deleted": cid}
 
 
-class TestCall(BaseModel):
-    to: str
+@app.get("/api/campaigns/{cid}/ivr/{lang}/{key}")
+def ivr_audio(cid: str, lang: str, key: str):
+    """One synthesised IVR phrase as a WAV (the Listen buttons). The greeting plays with the first recipient's name
+    when that is cached too."""
+    from fastapi.responses import Response
+    c = _get(cid)
+    recs = store.recipients(cid)
+    name = next((r["name"] for r in recs if r["language"] == lang), "")
+    pcm = audio.phrase_audio(c, lang, key, name)
+    if not pcm:
+        raise HTTPException(404, "Not synthesised yet")
+    return Response(audio.wav(pcm), media_type="audio/wav", headers={"Cache-Control": "no-store"})
 
 
-@app.post("/api/telephony/test-call")
-async def test_call(body: TestCall):
-    """Phase 1: place one call to a test number; the flow streams to /ws/exotel."""
-    if not exotel.configured():
-        raise HTTPException(503, "Exotel is not configured (see .env.example)")
-    return await exotel.place_call(body.to)
+class Synth(BaseModel):
+    force: bool = False
+
+
+@app.post("/api/campaigns/{cid}/ivr/synthesize")
+async def ivr_synthesize(cid: str, body: Synth):
+    """Synthesise the campaign's IVR audio in the background: only what is missing, or everything again with
+    force (Resynthesize). Works for any campaign, including live ones that never had audio."""
+    c = _get(cid)
+    if c["status"] == "preparing":
+        raise HTTPException(409, "The campaign is already preparing its audio")
+    if not audio.choose_voice(c):
+        raise HTTPException(400, "IVR audio uses ElevenLabs: set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID")
+    if not audio.start(cid, body.force):
+        raise HTTPException(409, "Already synthesising")
+    return {"started": True}

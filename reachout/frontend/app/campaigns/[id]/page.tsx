@@ -6,19 +6,47 @@ import { ago, CHANNEL, fmt, KIND, ORDER, OUT } from "@/lib/format";
 import { SCRIPT_FIELDS, type Detail, type Recipient } from "@/lib/types";
 import { useData, usePoll } from "@/components/hooks";
 import { Icon } from "@/components/Icon";
+import { Listen } from "@/components/Listen";
 import { useCrumbs, useShell } from "@/components/Shell";
 import { Breakdown, ErrorView, HandlingCard, Notice, OutcomePill, Skeleton, Stat, StatusPill } from "@/components/ui";
 
 const NON_RESPONDER = ["voicemail", "no_answer"];
 const FIELD_LABEL = { greeting: "Greeting", message: "Message", menu: "Keypad menu", voicemail: "Voicemail", goodbye: "Goodbye" };
 
-function Scripts({ d }: { d: Detail }) {
+function Scripts({ d, id, refresh }: { d: Detail; id: string; refresh: () => Promise<void> }) {
+  const { toast } = useShell();
   const [tab, setTab] = useState(0);
+  const [starting, setStarting] = useState(false);
   const s = d.scripts[tab];
+  const have = d.ivr[s.code] ?? {};
+  const complete = d.scripts.every(x => Object.values(d.ivr[x.code] ?? {}).length > 0 && Object.values(d.ivr[x.code]).every(Boolean));
+  const busy = starting || d.synthesising || d.status === "preparing";
+
+  const synthesize = async (force: boolean) => {
+    setStarting(true);
+    try {
+      await post(`/campaigns/${id}/ivr/synthesize`, { force });
+      toast(force ? "Resynthesising the IVR audio" : "Synthesising the IVR audio");
+      await refresh();
+    } catch (e) { toast((e as Error).message, "error"); }
+    finally { setStarting(false); }
+  };
+  const listen = (key: string) => () => fetch(`/api/campaigns/${id}/ivr/${s.code}/${encodeURIComponent(key)}`);
+  const row = (key: string, label: string, text: string) => (
+    <div key={key}><dt>{label}{have[key] !== undefined && <Listen disabled={!have[key]} load={listen(key)}
+      title={have[key] ? "Listen" : "Not synthesised yet"} />}</dt><dd>{text}</dd></div>
+  );
   return (
     <section className="card">
-      <div className="card-head"><h2>What recipients hear</h2>
-        <span className="muted" style={{ fontSize: 13 }}>Up to {d.retry_policy.max_attempts} attempts, {d.retry_policy.gap_hours} h apart</span>
+      <div className="card-head"><h2>IVR Responses</h2>
+        <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span className="muted" style={{ fontSize: 13 }}>Up to {d.retry_policy.max_attempts} attempts, {d.retry_policy.gap_hours} h apart</span>
+          <button className="btn sm" disabled={busy} onClick={() => void synthesize(complete)}
+            title={complete ? "Make every line again, for example after changing the voice" : "Make the audio that is missing"}>
+            {busy ? <span className="spinner" /> : <Icon name="refresh" size={14} />}
+            {busy ? "Synthesising" : complete ? "Resynthesize" : "Synthesize"}
+          </button>
+        </span>
       </div>
       <div className="tabs" role="tablist">
         {d.scripts.map((x, i) => (
@@ -26,10 +54,25 @@ function Scripts({ d }: { d: Detail }) {
         ))}
       </div>
       <div className="script"><dl>
-        {SCRIPT_FIELDS.map(f => <div key={f}><dt>{FIELD_LABEL[f]}</dt><dd>{s[f]}</dd></div>)}
-        {d.questions.map((q, i) => <div key={q.id}><dt>Question {i + 1}</dt><dd>{s.questions?.[q.id]}</dd></div>)}
-        {s.doubts && <div><dt>Closing question</dt><dd>{s.doubts}</dd></div>}
+        {SCRIPT_FIELDS.map(f => row(f, FIELD_LABEL[f], s[f]))}
+        {d.questions.map((q, i) => row(`q:${q.id}`, `Question ${i + 1}`, s.questions?.[q.id] ?? ""))}
+        {s.doubts && row("doubts", "Closing question", s.doubts)}
       </dl></div>
+    </section>
+  );
+}
+
+/** The instructions the live agent gets on every call, written for this campaign. */
+function SystemPrompt({ d }: { d: Detail }) {
+  return (
+    <section className="card">
+      <div className="card-head"><h2>Agent system prompt</h2>
+        <span className="muted" style={{ fontSize: 13 }}>{d.provider === "gemini" ? "Gemini" : "ElevenLabs"}, every call</span>
+      </div>
+      <div className="script"><pre style={{ whiteSpace: "pre-wrap", margin: 0, font: "inherit", lineHeight: 1.55 }}>{d.system_prompt}</pre></div>
+      <p className="muted" style={{ padding: "0 16px 16px", fontSize: 12 }}>
+        Sent with the event facts, the approved script in each person&apos;s language and the follow-up questions. {"{name}"} and {"{language}"} are filled in per person.
+      </p>
     </section>
   );
 }
@@ -70,7 +113,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
 
   useCrumbs([["Campaigns", "/campaigns"], [d?.name ?? "Campaign"]]);
   const refresh = async () => { try { setData(await api<Detail>(`/campaigns/${id}`)); } catch { /* keep last good view */ } };
-  usePoll(refresh, 2500, !!d && (d.status === "running" || d.status === "preparing" || d.totals.retrying > 0));
+  usePoll(refresh, 2500, !!d && (d.status === "running" || d.status === "preparing" || d.synthesising || d.totals.retrying > 0));
 
   if (error !== null) return <main className="view"><ErrorView status={error} retry={retry} /></main>;
   if (!d) return <main className="view"><Skeleton /></main>;
@@ -119,7 +162,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           <div><dt>Recipients</dt><dd>{fmt.int(d.totals.recipients)}</dd></div>
           <div><dt>Calls placed</dt><dd>{fmt.int(d.totals.calls_placed)}</dd></div>
         </dl>
-        <p className="muted" style={{ marginTop: 12, fontSize: 12 }}>Call recordings stay with Exotel until their own retention removes them.</p>
+        <p className="muted" style={{ marginTop: 12, fontSize: 12 }}>Older call recordings stay where they were stored until their own retention removes them.</p>
       </>
     ),
     confirmLabel: "Delete campaign",
@@ -172,6 +215,8 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           <h1>{d.name}</h1>
           <div className="meta">
             <StatusPill s={d.status} /><span className="chip">{KIND[d.kind] || d.kind}</span>
+            <span className="chip">{d.provider === "gemini" ? "Gemini" : "ElevenLabs"}</span>
+            <span className="chip">{d.mode === "hybrid" ? "Hybrid" : "Live"}</span>
             {d.simulated && <span className="chip" title="Demo mode: no real calls were placed">Simulated</span>}
             {d.languages.map(l => <span key={l} className="chip">{l}</span>)}
             <span className="muted">Started {ago(d.started_at)}</span>
@@ -186,6 +231,8 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
             {busy ? `Retrying ${fmt.int(s.retrying)}` : "Retry non-responders"}
             {!busy && n > 0 && <span className="count">{fmt.int(n)}</span>}
           </button>
+          <button className="btn" disabled={calling} onClick={() => router.push(`/campaigns/${id}/edit`)}
+            title={calling ? "Pause the campaign before editing it" : "Edit campaign"}><Icon name="type" />Edit</button>
           <button className="btn danger" disabled={calling} onClick={openDelete} aria-label="Delete campaign"
             title={calling ? "Pause the campaign before deleting it" : "Delete campaign"}><Icon name="trash" /></button>
         </div>
@@ -206,7 +253,8 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
       {d.note && <div className="stack-gap"><Notice kind={d.status === "paused" ? "warn" : "info"}>{d.note}</Notice></div>}
       <HandlingCard h={d.handling} />
       {d.questions.length > 0 && <Answers d={d} />}
-      {d.scripts.length > 0 && <Scripts d={d} />}
+      {d.system_prompt && <SystemPrompt d={d} />}
+      {d.scripts.length > 0 && <Scripts d={d} id={id} refresh={refresh} />}
 
       <section className="card">
         <div className="card-head"><h2>Recipients</h2>

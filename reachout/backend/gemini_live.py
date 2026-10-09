@@ -39,6 +39,7 @@ def ready() -> bool:
     return bool(os.getenv("GEMINI_API_KEY"))
 
 
+
 class Resampler:
     """Streaming 16-bit mono resampler between whole-number-friendly rates (8k/16k/24k)."""
 
@@ -84,20 +85,38 @@ def system_prompt(variables: dict[str, str], language: str) -> str:
 
 async def bridge(recv: Callable[[], Awaitable[dict | None]], send_audio: Callable[[bytes], Awaitable[None]],
                  clear: Callable[[], Awaitable[None]], variables: dict[str, str], language: str,
-                 on_outcome: Callable[[str], bool], preroll: bytes = b"") -> None:
+                 on_outcome: Callable[[str], bool], preroll: bytes = b"", *, instructions: str = "",
+                 opening: str = "", questions: list[dict] | None = None,
+                 on_answer: Callable[[str, str], bool] | None = None) -> None:
     """recv() yields Exotel events (None when the call ends); audio is PCM16 8 kHz both ways.
-    preroll: what the caller already said before we were connected; it is sent first."""
+    preroll: what the caller already said before we were connected; it is sent first.
+    Outbound calls (the web phone) pass the campaign's `instructions`, an `opening` to start with, and the
+    follow-up `questions` the agent can save answers to with record_answer."""
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    declarations = [types.FunctionDeclaration(
+        name="record_outcome", description="Save the person's decision about the invitation or reminder.",
+        parameters=types.Schema(type="OBJECT", properties={
+            "outcome": types.Schema(type="STRING", enum=list(OUTCOMES))}, required=["outcome"]))]
+    if questions and on_answer:
+        declarations.append(types.FunctionDeclaration(
+            name="record_answer", description="Save the person's answer to one of the follow-up questions.",
+            parameters=types.Schema(type="OBJECT", properties={
+                "question_id": types.Schema(type="STRING", enum=[q["id"] for q in questions]),
+                "option_number": types.Schema(type="INTEGER", description="The 1-based number of the chosen option")},
+                required=["question_id", "option_number"])))
     config = types.LiveConnectConfig(
         response_modalities=["AUDIO"],
-        system_instruction=system_prompt(variables, language),
-        tools=[types.Tool(function_declarations=[types.FunctionDeclaration(
-            name="record_outcome", description="Save the caller's answer to the invitation or reminder.",
-            parameters=types.Schema(type="OBJECT", properties={
-                "outcome": types.Schema(type="STRING", enum=list(OUTCOMES))}, required=["outcome"]))])],
+        system_instruction=instructions or system_prompt(variables, language),
+        tools=[types.Tool(function_declarations=declarations)],
+        # Phone speakers and room noise leak into the mic: make the "caller started talking" detector less
+        # twitchy so the agent is not cut off mid-sentence, and wait a little longer before deciding they are done.
+        realtime_input_config=types.RealtimeInputConfig(automatic_activity_detection=types.AutomaticActivityDetection(
+            start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,
+            end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
+            prefix_padding_ms=40, silence_duration_ms=int(os.getenv("GEMINI_SILENCE_MS", "600")))),
     )
     up, down = Resampler(8000, 16000), Resampler(24000, 8000)
     async with client.aio.live.connect(model=model(), config=config) as session:
@@ -105,9 +124,10 @@ async def bridge(recv: Callable[[], Awaitable[dict | None]], send_audio: Callabl
             for i in range(0, len(preroll), 640):
                 await session.send_realtime_input(audio=types.Blob(data=up(preroll[i:i + 640]), mime_type="audio/pcm;rate=16000"))
         else:
+            kick = ("The call has just connected and the person has answered. Begin now. Open with this, in your own natural "
+                    f"words and their language: {opening}" if opening else "The caller just joined. Greet them briefly.")
             await session.send_client_content(
-                turns=types.Content(role="user", parts=[types.Part(text="The caller just joined. Greet them briefly.")]),
-                turn_complete=True)
+                turns=types.Content(role="user", parts=[types.Part(text=kick)]), turn_complete=True)
         log.info("gemini live assistant connected (%s)", model())
 
         async def caller_to_agent() -> None:
@@ -124,7 +144,11 @@ async def bridge(recv: Callable[[], Awaitable[dict | None]], send_audio: Callabl
                     if m.tool_call:
                         responses = []
                         for fc in m.tool_call.function_calls:
-                            ok = fc.name == "record_outcome" and on_outcome(str((fc.args or {}).get("outcome", "")))
+                            a = fc.args or {}
+                            if fc.name == "record_answer" and on_answer:
+                                ok = on_answer(str(a.get("question_id", "")), str(a.get("option_number", "")))
+                            else:
+                                ok = fc.name == "record_outcome" and on_outcome(str(a.get("outcome", "")))
                             responses.append(types.FunctionResponse(
                                 id=fc.id, name=fc.name, response={"result": "saved" if ok else "unknown tool or outcome"}))
                         await session.send_tool_response(function_responses=responses)

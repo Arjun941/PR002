@@ -5,8 +5,10 @@
 What it sets up on your ElevenLabs account:
   - an agent named "Reachout assistant" whose prompt uses the dynamic variables the app sends at call
     start ({{org}} {{title}} {{when}} {{venue}} {{details}} {{language}} {{answer}}),
-  - a client tool `record_outcome(outcome)` that the app handles (backend/elevenlabs.py),
-  - per-conversation overrides for language and first message, so one agent serves every campaign.
+  - client tools `record_outcome(outcome)` and `record_answer(question_id, option_number)` that the app
+    handles (backend/elevenlabs.py),
+  - per-conversation overrides for the system prompt, first message and language: each campaign sends its
+    own prompt and everything it knows, so one agent serves every campaign.
 It then writes ELEVENLABS_AGENT_ID (and ELEVENLABS_VOICE_ID, if empty) to .env. Safe to re-run: an agent
 with the same name is updated in place. Audio: the agent uses ElevenLabs' default 16 kHz PCM; the bridge
 reads the actual formats from the conversation metadata, so nothing here needs to match Exotel.
@@ -55,12 +57,19 @@ CONFIG = {
                     "description": "Save the caller's answer to the invitation or reminder.",
                     "parameters": {"type": "object", "required": ["outcome"], "properties": {
                         "outcome": {"type": "string", "description": "One of: confirmed, declined, rescheduled"}}},
+                }, {
+                    "type": "client", "name": "record_answer", "expects_response": True,
+                    "description": "Save the caller's answer to one of the follow-up questions.",
+                    "parameters": {"type": "object", "required": ["question_id", "option_number"], "properties": {
+                        "question_id": {"type": "string", "description": "The question's id, for example q1"},
+                        "option_number": {"type": "integer", "description": "The number of the option the caller chose"}}},
                 }],
             },
         },
         "tts": {"voice_id": VOICE},
     },
-    "platform_settings": {"overrides": {"conversation_config_override": {"agent": {"language": True, "first_message": True}}}},
+    "platform_settings": {"overrides": {"conversation_config_override": {"agent": {
+        "language": True, "first_message": True, "prompt": {"prompt": True}}}}},
 }
 
 

@@ -1,6 +1,8 @@
-"""Campaign builder (Phase 4): event details -> one drafting call -> human review -> cost
-estimate -> launch. Launch places real calls when the dialer is ready, simulates them in
-demo mode, and is refused otherwise.
+"""Campaign builder (Phase 4): event details -> one drafting call (scripts + the agent's system prompt)
+-> human review -> cost estimate -> launch. A campaign picks one provider (ElevenLabs or Gemini) and a mode:
+  live    the agent takes over the whole call
+  hybrid  pre-synthesised IVR with the keypad, then the agent for anyone with a question at the end
+Calls ring the phone page (webphone.py); the IVR audio is synthesised when the campaign is created.
 """
 from __future__ import annotations
 
@@ -15,7 +17,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from . import agents, audio, chatgpt, costs, dialer, llm, store
+from . import audio, callctx, catalog, costs, llm, store, webphone
 from .store import LANGUAGES, now_iso
 
 router = APIRouter(prefix="/api")
@@ -25,6 +27,9 @@ KINDS = {"seminar": "Seminar invitation", "clinic": "Clinic reminder", "school":
          "payment": "Payment reminder"}
 MAX_CONTACTS = 5000
 Kind = Literal["seminar", "clinic", "school", "payment"]
+Provider = Literal["elevenlabs", "gemini"]
+Mode = Literal["live", "hybrid"]
+MAX_PROMPT = 6000
 
 
 class Event(BaseModel):
@@ -63,9 +68,8 @@ class Retry(BaseModel):
 class DraftReq(BaseModel):
     event: Event
     languages: list[str] = Field(min_length=1)
-    text_provider: Literal["template", "chatgpt", "ollama", "sarvam"] = "template"
-    escalation: bool = True
-    agent_provider: str = ""
+    provider: Provider
+    mode: Mode = "hybrid"
 
 
 class ContactsReq(BaseModel):
@@ -79,22 +83,17 @@ class EstimateReq(BaseModel):
     scripts: dict[str, Script]
     retry: Retry
     questions: list[Question] = Field(default_factory=list, max_length=llm.MAX_QUESTIONS)
-    escalation: bool
-    record: bool
-    voice_provider: Literal["piper", "sarvam", "elevenlabs"]
-    text_provider: Literal["template", "chatgpt", "ollama", "sarvam"]
-    agent_provider: str = ""
+    provider: Provider
+    mode: Mode
 
 
 class CreateReq(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     event: Event
     languages: list[str] = Field(min_length=1)
-    text_provider: Literal["template", "chatgpt", "ollama", "sarvam"]
-    voice_provider: Literal["piper", "sarvam", "elevenlabs"]
-    escalation: bool
-    agent_provider: str = ""
-    record: bool
+    provider: Provider
+    mode: Mode
+    system_prompt: str = Field("", max_length=MAX_PROMPT)
     contacts_csv: str = Field(max_length=1_000_000)
     scripts: dict[str, Script]
     questions: list[Question] = Field(default_factory=list, max_length=llm.MAX_QUESTIONS)
@@ -109,23 +108,9 @@ def _check_langs(langs: list[str]) -> list[str]:
     return list(dict.fromkeys(langs))
 
 
-def escalation_ready() -> bool:
-    """Key 4 needs a live assistant (Gemini Live or ElevenLabs); without one campaigns are keypad only."""
-    return agents.any_ready()
-
-
-def pick_agent(requested: str) -> str:
-    """The requested live assistant, or the default; 400 if it is unknown or not configured."""
-    key = requested or agents.default()
-    if key not in agents.PROVIDERS:
-        raise HTTPException(400, f"Unknown live assistant: {key}")
-    if not agents.ready(key):
-        raise HTTPException(400, f"{agents.PROVIDERS[key]['label']} is not set up (set {agents.PROVIDERS[key]['setup']})")
-    return key
-
-
-def launch_mode() -> str:
-    return "live" if dialer.ready() else "simulated" if DEMO else "unavailable"
+def escalation_ready(provider: str) -> bool:
+    """The closing "any other questions?" needs the provider's live conversation."""
+    return catalog.ready(provider, "live")
 
 
 # ---------- contacts ----------
@@ -193,25 +178,20 @@ def options():
     return {
         "languages": [{"code": c, "name": n} for c, n in LANGUAGES.items()],
         "kinds": [{"value": k, "label": l} for k, l in KINDS.items()],
-        "text_providers": [{"key": k, **v, "available": llm.available(k), "live": llm.live(k)}
-                           for k, v in llm.TEXT_PROVIDERS.items()],
-        # Only providers that can synthesise call audio can launch real calls; any can be simulated.
-        "voice_providers": [{"key": k, **v, "available": audio.ready(k)} for k, v in llm.VOICE_PROVIDERS.items()],
-        "escalation": {"available": escalation_ready(), "label": agents.PROVIDERS[agents.default()]["label"],
-                       "sends": agents.PROVIDERS[agents.default()]["sends"]},
-        "agent_providers": [{"key": k, **v, "available": agents.ready(k)} for k, v in agents.PROVIDERS.items()],
-        "default_agent": agents.default(),
-        "chatgpt": chatgpt.status(),
-        "launch_mode": launch_mode(),
-        "call_window": os.getenv("CALL_WINDOW", "09:00-20:00"),
+        "providers": [{"key": k, "label": catalog.label(k), "region": p["region"], "sends": p["sends"],
+                       "caps": {cap: {"supported": catalog.supports(k, cap), "ready": catalog.ready(k, cap),
+                                      "missing": catalog.missing(k, cap)} for cap in p["caps"]}}
+                      for k, p in catalog.PROVIDERS.items()],
+        "default_provider": catalog.default(),
+        "phones": webphone.connected(),
     }
 
 
 @router.post("/builder/draft")
 def draft(body: DraftReq):
     """The one drafting call for this campaign (sync: the provider client blocks)."""
-    d, warnings = llm.draft(body.event.model_dump(), _check_langs(body.languages), body.text_provider,
-                            body.escalation and escalation_ready())
+    d, warnings = llm.draft(body.event.model_dump(), _check_langs(body.languages), body.provider,
+                            body.mode == "hybrid" and escalation_ready(body.provider))
     return {"draft": d, "warnings": warnings}
 
 
@@ -233,38 +213,60 @@ def contacts(body: ContactsReq):
 @router.post("/builder/estimate")
 def estimate(body: EstimateReq):
     _check_langs(list(body.by_language))
-    escalation = body.escalation and escalation_ready()
     return costs.estimate(kind=body.kind, by_language=body.by_language,
                           scripts={l: s.model_dump() for l, s in body.scripts.items()},
-                          max_attempts=body.retry.max_attempts, escalation=escalation, questions=len(body.questions),
-                          voice=body.voice_provider, text=body.text_provider) | {
-        "handling": handling(body.voice_provider, body.text_provider, escalation, body.record,
-                             pick_agent(body.agent_provider) if escalation else "")}
+                          max_attempts=body.retry.max_attempts, questions=len(body.questions),
+                          provider=body.provider, mode=body.mode) | {
+        "handling": handling(body.provider, body.mode, audio.choose_voice({"provider": body.provider}) or body.provider)}
 
 
-def handling(voice: str, text: str, escalation: bool, record: bool, agent: str = "") -> dict:
-    v = llm.VOICE_PROVIDERS[voice]
-    return {
-        "audio": {"provider": v["label"], "note": v["sends"]},
-        "text": ({"provider": agents.PROVIDERS[agent]["label"],
-                  "note": "Only callers who ask a question at the end; their voice goes to " + agents.PROVIDERS[agent]["region"]}
-                 if escalation and agent else {"provider": "Keypad only", "note": "No speech is processed"}),
-        "recordings": ({"provider": "Exotel", "note": "Stored in India, played back only after unlocking"}
-                       if record else {"provider": "Not recorded", "note": "No call audio is kept"}),
-    }
+def handling(provider: str, mode: str, voice: str = "") -> dict:
+    p = catalog.PROVIDERS[provider]
+    if mode == "live":
+        return {"audio": {"provider": p["label"], "note": "The whole call is a live conversation. " + p["sends"]},
+                "text": {"provider": p["label"], "note": "Speech is processed live for the whole call"},
+                "recordings": {"provider": "Not recorded", "note": "No call audio is kept"}}
+    v = catalog.PROVIDERS.get(voice or provider, p)
+    return {"audio": {"provider": v["label"], "note": "IVR phrases and names are synthesised once. " + v["sends"]},
+            "text": {"provider": p["label"],
+                     "note": "Only callers who ask a question at the end; their voice goes to " + p["region"]},
+            "recordings": {"provider": "Not recorded", "note": "No call audio is kept"}}
+
+
+class PreviewReq(BaseModel):
+    provider: Provider
+    language: str
+    text: str = Field(min_length=1, max_length=800)
+
+
+@router.post("/builder/preview-audio")
+async def preview_audio(body: PreviewReq):
+    """Synthesise one IVR phrase so it can be heard while writing the script. Cached, so launching the campaign
+    reuses it (the greeting's {name} is filled with a sample name here; each real name is made at launch)."""
+    from fastapi.responses import Response
+    _check_langs([body.language])
+    voice = audio.choose_voice({"provider": body.provider})
+    if not voice:
+        raise HTTPException(400, "IVR audio uses ElevenLabs: set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID")
+    try:
+        pcm = await audio.synth_text(voice, body.language, body.text.replace("{name}", "Asha"))
+    except Exception as exc:
+        raise HTTPException(502, f"{catalog.label(voice)} could not synthesise this ({type(exc).__name__})")
+    return Response(audio.wav(pcm), media_type="audio/wav", headers={"Cache-Control": "no-store"})
 
 
 @router.post("/campaigns", status_code=201)
 def create(body: CreateReq):
     if not body.reviewed:
         raise HTTPException(400, "Review the scripts before launch")
-    mode = launch_mode()
-    if mode == "unavailable":
-        raise HTTPException(503, "Calling is not set up: configure Exotel, PUBLIC_URL and WEBHOOK_TOKEN, "
-                                 "or start the server with DEMO=1 to simulate")
-    if mode == "live" and not audio.ready(body.voice_provider):
-        raise HTTPException(400, f"{llm.VOICE_PROVIDERS[body.voice_provider]['label']} cannot produce call audio yet; "
-                                 "choose ElevenLabs (set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID)")
+    hybrid = body.mode == "hybrid"
+    if not catalog.ready(body.provider, "live"):
+        raise HTTPException(400, f"{catalog.label(body.provider)} is not set up for live calls "
+                                 f"(set {', '.join(catalog.missing(body.provider, 'live'))})")
+    voice = audio.choose_voice({"provider": body.provider}) if hybrid else ""
+    if hybrid and not voice:
+        raise HTTPException(400, "Hybrid mode makes its IVR audio with ElevenLabs: set ELEVENLABS_API_KEY and "
+                                 "ELEVENLABS_VOICE_ID")
     langs = _check_langs(body.languages)
     missing = [LANGUAGES[l] for l in langs if l not in body.scripts]
     if missing:
@@ -276,7 +278,7 @@ def create(body: CreateReq):
                 if not body.scripts[l].questions.get(q.id, "").strip()]
     if unspoken:
         raise HTTPException(400, f"Write the spoken question for {', '.join(unspoken[:3])}")
-    if body.escalation and escalation_ready():
+    if hybrid:
         silent = [LANGUAGES[l] for l in langs if not body.scripts[l].doubts.strip()]
         if silent:
             raise HTTPException(400, f"Write the closing question (any other questions?) for {', '.join(silent)}")
@@ -288,26 +290,26 @@ def create(body: CreateReq):
 
     slug = re.sub(r"[^a-z0-9]+", "-", body.name.lower()).strip("-")[:40] or "campaign"
     cid = f"{slug}-{secrets.token_hex(3)}"
-    # Escalation needs the agent at call time; keypad-only campaigns never run one.
-    escalation = body.escalation and escalation_ready()
-    agent = pick_agent(body.agent_provider) if escalation else agents.default()
+    prompt = body.system_prompt.strip() or callctx.default_system_prompt(
+        body.event.model_dump(), [q.model_dump() for q in body.questions])
     c = {
         # Live campaigns synthesise their audio first (audio.py moves them to running).
         "id": cid, "name": body.name.strip(), "kind": body.event.kind,
-        "status": "preparing" if mode == "live" else "running", "voice": body.voice_provider,
+        "status": "preparing" if hybrid else "running", "voice": voice,
         "languages": langs, "segments": list(dict.fromkeys(r["segment"] for r in rows)), "started_at": now_iso(),
-        "handling": handling(body.voice_provider, body.text_provider, escalation, body.record, agent if escalation else ""),
+        "handling": handling(body.provider, body.mode, voice),
         "event": body.event.model_dump(),
         "scripts": {l: body.scripts[l].model_dump() | {"questions": {q.id: body.scripts[l].questions[q.id] for q in body.questions}}
                     for l in langs},
         "questions": [q.model_dump() for q in body.questions], "retry": body.retry.model_dump(),
-        "record": int(body.record), "escalation": int(escalation), "agent_provider": agent, "simulated": int(mode == "simulated"),
+        "record": 0, "escalation": int(hybrid), "agent_provider": body.provider,
+        "provider": body.provider, "mode": body.mode, "telephony": "webphone", "system_prompt": prompt, "simulated": 0,
     }
     recs = [{
         "id": f"{cid}-{i}", "campaign_id": cid, "name": r["name"], "phone": r["phone"], "language": r["language"],
         "segment": r["segment"], "outcome": "pending", "channel": None, "attempts": 0, "retrying": 0, "in_flight": 0,
         "call_sid": None, "last_attempt_at": None, "recording_url": None,
-        "pickup": costs.PICKUP.get(body.event.kind, .6) if mode == "simulated" else None,
+        "pickup": None,
     } for i, r in enumerate(rows)]
     store.insert_campaign(c, recs)
-    return {"id": cid, "mode": mode, "recipients": len(recs)}
+    return {"id": cid, "mode": body.mode, "recipients": len(recs)}

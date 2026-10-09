@@ -44,7 +44,10 @@ _JSON = ("languages", "segments", "handling", "event", "scripts", "retry", "sim"
 # Columns added after the first release; init() adds them to older databases.
 _ADDED = {"campaigns": [("voice", "TEXT NOT NULL DEFAULT ''"), ("audio_ready", "INTEGER NOT NULL DEFAULT 0"),
                         ("note", "TEXT"), ("questions", "TEXT NOT NULL DEFAULT '[]'"),
-                        ("agent_provider", "TEXT NOT NULL DEFAULT 'elevenlabs'")],
+                        ("agent_provider", "TEXT NOT NULL DEFAULT 'elevenlabs'"),
+                        ("provider", "TEXT NOT NULL DEFAULT ''"), ("telephony", "TEXT NOT NULL DEFAULT 'exotel'"),
+                        ("system_prompt", "TEXT NOT NULL DEFAULT ''"),
+                        ("mode", "TEXT NOT NULL DEFAULT 'live'")],
           "recipients": [("answers", "TEXT NOT NULL DEFAULT '{}'")]}
 _DUE = ("campaign_id = ? AND in_flight = 0 AND (outcome = 'pending' "
         "OR (outcome IN ('voicemail', 'no_answer') AND attempts < ? AND last_attempt_at <= ?))")
@@ -189,6 +192,12 @@ class SqliteStore:
         with self._tx() as db:
             db.execute("UPDATE campaigns SET audio_ready = 1, note = NULL WHERE id = ?", (cid,))
             db.execute("UPDATE campaigns SET status = 'running' WHERE id = ? AND status = 'preparing'", (cid,))
+
+    def update_campaign(self, cid: str, fields: dict) -> None:
+        """Sets the given campaign columns (JSON ones are encoded). Callers pass only known fields."""
+        vals = [json.dumps(v) if k in _JSON else int(v) if isinstance(v, bool) else v for k, v in fields.items()]
+        with self._tx() as db:
+            db.execute(f"UPDATE campaigns SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?", [*vals, cid])
 
     def set_note(self, cid: str, note: str | None) -> None:
         with self._tx() as db:

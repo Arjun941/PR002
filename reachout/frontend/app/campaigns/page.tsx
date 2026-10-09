@@ -31,7 +31,7 @@ export default function CampaignsPage() {
           <div><dt>Recipients</dt><dd>{fmt.int(c.totals.recipients)}</dd></div>
           <div><dt>Calls placed</dt><dd>{fmt.int(c.totals.calls_placed)}</dd></div>
         </dl>
-        <p className="muted" style={{ marginTop: 12, fontSize: 12 }}>Call recordings stay with Exotel until their own retention removes them.</p>
+        <p className="muted" style={{ marginTop: 12, fontSize: 12 }}>Older call recordings stay where they were stored until their own retention removes them.</p>
       </>
     ),
     confirmLabel: "Delete campaign",

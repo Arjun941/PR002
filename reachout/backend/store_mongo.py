@@ -24,7 +24,7 @@ from .dbcommon import ANSWERED, BOOL_FIELDS, ago, now_iso
 
 _CAMPAIGN_DEFAULTS = {"voice": "", "audio_ready": False, "note": None, "questions": [], "sim": {},
                       "event": {}, "scripts": {}, "retry": {}, "segments": [], "languages": [],
-                      "agent_provider": "elevenlabs"}
+                      "agent_provider": "elevenlabs", "provider": "", "telephony": "webphone", "system_prompt": "", "mode": "live"}
 _QID = re.compile(r"[\w-]+")  # becomes part of a field path, so no dots or operators
 _DUE_RETRY = ("voicemail", "no_answer")
 
@@ -156,6 +156,9 @@ class MongoStore:
     def finish_audio(self, cid: str) -> None:
         self.campaigns_c.update_one({"_id": cid}, {"$set": {"audio_ready": True, "note": None}})
         self.campaigns_c.update_one({"_id": cid, "status": "preparing"}, {"$set": {"status": "running"}})
+
+    def update_campaign(self, cid: str, fields: dict) -> None:
+        self.campaigns_c.update_one({"_id": cid}, {"$set": fields})
 
     def set_note(self, cid: str, note: str | None) -> None:
         self.campaigns_c.update_one({"_id": cid}, {"$set": {"note": note}})
