@@ -82,6 +82,7 @@ export function AssistantChat() {
     if (scope === "create") setChat({ key: scopeKey, turns: [GREETINGS.create] });
     else if (scope === "builder") { const t = loadChat(); setChat({ key: scopeKey, turns: t.length ? t : [GREETINGS.builder] }); }
     else {
+      setOpen(true);  // opening a campaign slides its agent panel in
       setChat({ key: scopeKey, turns: [GREETINGS.campaign] });
       api<{ messages: ChatTurn[] }>(`/campaigns/${encodeURIComponent(cid)}/chat`)
         .then(r => { if (live && r.messages.length) setChat({ key: scopeKey, turns: r.messages }); })
