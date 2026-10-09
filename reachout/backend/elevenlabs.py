@@ -1,12 +1,14 @@
-"""ElevenLabs: text-to-speech for pre-synthesis, and the Conversational AI agent that takes a
-call when the caller presses 4.
+"""ElevenLabs: text-to-speech for pre-synthesis, and the Conversational AI agent that answers a
+caller who asks a question when the call ends with "any other questions?".
 
 All audio we exchange with Exotel is 16-bit PCM, 8 kHz mono; everything here converts to and
 from that. Endpoint paths, the agent WebSocket events and the output formats were written from
 memory and are UNVERIFIED: check them on the first real call.
 
 Agent setup (ElevenLabs dashboard), so the bridge below can work:
-- Prompt may use the dynamic variables {{org}}, {{title}}, {{when}}, {{venue}}, {{details}}, {{language}}.
+- Prompt may use the dynamic variables {{org}}, {{title}}, {{when}}, {{venue}}, {{details}}, {{language}} and
+  {{answer}} (what the caller chose on the keypad). Leave the first message empty: the caller has already
+  started asking, and their first words are passed on, so the agent should answer rather than greet.
 - A client tool `record_outcome` with one string parameter `outcome` (confirmed | declined | rescheduled).
   Tell the agent to call it once the caller decides, then to end the call (enable the end_call tool).
 - Audio formats: μ-law 8000 Hz in and out is the closest to the phone line; others are converted.
@@ -23,11 +25,13 @@ from typing import Awaitable, Callable
 
 import httpx
 from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosedOK
 
 log = logging.getLogger("reachout.elevenlabs")
 
 API = "https://api.elevenlabs.io"
 RATE = 8000  # the phone line
+AGENT_MAX_SECONDS = int(os.getenv("AGENT_MAX_SECONDS", "300"))  # cost cap per escalated call
 # multilingual_v2 covers English, Hindi and Tamil; v3 is used for the other Indian languages.
 V2_LANGS = {"en", "hi", "ta"}
 
@@ -142,9 +146,10 @@ async def _signed_url() -> str:
 
 async def bridge(recv: Callable[[], Awaitable[dict | None]], send_audio: Callable[[bytes], Awaitable[None]],
                  clear: Callable[[], Awaitable[None]], variables: dict[str, str], language: str,
-                 on_outcome: Callable[[str], bool]) -> None:
-    """Connect the caller to the agent until either side hangs up.
-    recv() yields Exotel events (None when the call ends); audio is PCM16 8 kHz both ways."""
+                 on_outcome: Callable[[str], bool], preroll: bytes = b"") -> None:
+    """Connect the caller to the agent until either side hangs up or AGENT_MAX_SECONDS pass.
+    recv() yields Exotel events (None when the call ends); audio is PCM16 8 kHz both ways.
+    preroll: what the caller already said before the agent was connected; it is sent first."""
     init: dict = {"type": "conversation_initiation_client_data", "dynamic_variables": variables}
     if os.getenv("ELEVENLABS_AGENT_LANGUAGE_OVERRIDE") == "1":  # needs overrides enabled on the agent
         init["conversation_config_override"] = {"agent": {"language": language}}
@@ -170,6 +175,8 @@ async def bridge(recv: Callable[[], Awaitable[dict | None]], send_audio: Callabl
                     fmt["in"] = meta.get("user_input_audio_format", fmt["in"])
                     fmt["out"] = meta.get("agent_output_audio_format", fmt["out"])
                     log.info("agent conversation started (in=%s out=%s)", fmt["in"], fmt["out"])
+                    if preroll:
+                        await agent.send(json.dumps({"user_audio_chunk": base64.b64encode(from_line(preroll, fmt["in"])).decode()}))
                     ready.set()
                 elif t == "audio":
                     await send_audio(to_line(base64.b64decode(m["audio_event"]["audio_base_64"]), fmt["out"]))
@@ -185,9 +192,11 @@ async def bridge(recv: Callable[[], Awaitable[dict | None]], send_audio: Callabl
                 # user_transcript / agent_response carry what was said: never logged at INFO.
 
         tasks = [asyncio.create_task(caller_to_agent()), asyncio.create_task(agent_to_caller())]
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        done, pending = await asyncio.wait(tasks, timeout=AGENT_MAX_SECONDS, return_when=asyncio.FIRST_COMPLETED)
+        if not done:
+            log.info("agent conversation reached the %d s cap", AGENT_MAX_SECONDS)
         for t in pending:
             t.cancel()
         for t in done:
-            if t.exception():
+            if t.exception() and not isinstance(t.exception(), ConnectionClosedOK):  # OK = the agent hung up
                 log.warning("agent bridge ended with %s", type(t.exception()).__name__)

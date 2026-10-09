@@ -1,4 +1,5 @@
 "use client";
+import { useRouter } from "next/navigation";
 import { use, useRef, useState } from "react";
 import { api, post } from "@/lib/api";
 import { ago, CHANNEL, fmt, KIND, ORDER, OUT } from "@/lib/format";
@@ -26,7 +27,34 @@ function Scripts({ d }: { d: Detail }) {
       </div>
       <div className="script"><dl>
         {SCRIPT_FIELDS.map(f => <div key={f}><dt>{FIELD_LABEL[f]}</dt><dd>{s[f]}</dd></div>)}
+        {d.questions.map((q, i) => <div key={q.id}><dt>Question {i + 1}</dt><dd>{s.questions?.[q.id]}</dd></div>)}
+        {s.doubts && <div><dt>Closing question</dt><dd>{s.doubts}</dd></div>}
       </dl></div>
+    </section>
+  );
+}
+
+/** Follow-up answers: how many people pressed each option. */
+function Answers({ d }: { d: Detail }) {
+  return (
+    <section className="card">
+      <div className="card-head"><h2>Answers to follow-up questions</h2></div>
+      <div className="answers">
+        {d.questions.map(q => (
+          <div className="answer" key={q.id}>
+            <div className="answer-head"><b>{q.label}</b>
+              <span className="muted">{fmt.int(q.answered)} answered{q.only_if_confirmed ? " · asked to people who confirmed" : ""}</span>
+            </div>
+            {q.results.map(o => (
+              <div className="arow" key={o.key}>
+                <span className="alabel"><kbd>{o.key}</kbd>{o.label}</span>
+                <span className="abar"><i style={{ width: `${q.answered ? (o.count / q.answered) * 100 : 0}%` }} /></span>
+                <span className="aval">{fmt.int(o.count)}<small>{q.answered ? fmt.pct(o.count / q.answered) : "–"}</small></span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
     </section>
   );
 }
@@ -34,6 +62,7 @@ function Scripts({ d }: { d: Detail }) {
 export default function CampaignDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const { toast, modal } = useShell();
+  const router = useRouter();
   const { data: d, setData, error, retry } = useData(() => api<Detail>(`/campaigns/${id}`), [id]);
   const [f, setF] = useState({ q: "", outcome: "all", language: "all", segment: "all", limit: 50 });
   const [playing, setPlaying] = useState<Recipient | null>(null);
@@ -75,6 +104,29 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
       const res = await post<{ queued: number }>(`/campaigns/${id}/retry`);
       toast(`Retrying ${fmt.int(res.queued)} recipients`);
       await refresh();
+    },
+  });
+
+  const calling = d.status === "running" || d.status === "preparing";
+  const openDelete = () => modal({
+    title: "Delete this campaign?",
+    danger: true,
+    body: (
+      <>
+        <b style={{ color: "var(--text)" }}>{d.name}</b> will be removed for good: its contacts, outcomes, answers and call log.
+        This cannot be undone.
+        <dl className="facts">
+          <div><dt>Recipients</dt><dd>{fmt.int(d.totals.recipients)}</dd></div>
+          <div><dt>Calls placed</dt><dd>{fmt.int(d.totals.calls_placed)}</dd></div>
+        </dl>
+        <p className="muted" style={{ marginTop: 12, fontSize: 12 }}>Call recordings stay with Exotel until their own retention removes them.</p>
+      </>
+    ),
+    confirmLabel: "Delete campaign",
+    onConfirm: async () => {
+      await post(`/campaigns/${id}`, undefined, "DELETE");
+      toast(`Deleted “${d.name}”`);
+      router.push("/campaigns");
     },
   });
 
@@ -126,7 +178,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           </div>
         </div>
         <div className="actions" style={{ display: "flex", gap: 8 }}>
-          {(d.status === "running" || d.status === "preparing") && <button className="btn" onClick={() => void setStatus("paused")}><Icon name="pause" />Pause</button>}
+          {calling && <button className="btn" onClick={() => void setStatus("paused")}><Icon name="pause" />Pause</button>}
           {d.status === "paused" && <button className="btn" onClick={() => void setStatus("running")}><Icon name="play" />Resume</button>}
           <button className="btn primary" disabled={n === 0 || busy} onClick={openRetry}
             title={n === 0 && !busy ? "No one is waiting for a retry" : ""}>
@@ -134,6 +186,8 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
             {busy ? `Retrying ${fmt.int(s.retrying)}` : "Retry non-responders"}
             {!busy && n > 0 && <span className="count">{fmt.int(n)}</span>}
           </button>
+          <button className="btn danger" disabled={calling} onClick={openDelete} aria-label="Delete campaign"
+            title={calling ? "Pause the campaign before deleting it" : "Delete campaign"}><Icon name="trash" /></button>
         </div>
       </div>
 
@@ -151,6 +205,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
 
       {d.note && <div className="stack-gap"><Notice kind={d.status === "paused" ? "warn" : "info"}>{d.note}</Notice></div>}
       <HandlingCard h={d.handling} />
+      {d.questions.length > 0 && <Answers d={d} />}
       {d.scripts.length > 0 && <Scripts d={d} />}
 
       <section className="card">
@@ -184,13 +239,15 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           <>
             <div className="table-wrap">
               <table className="table">
-                <thead><tr><th>Name</th><th>Phone</th><th>Language</th><th>Segment</th><th>Outcome</th><th>Replied by</th><th className="num">Attempts</th><th><span className="sr-only">Recording</span></th></tr></thead>
+                <thead><tr><th>Name</th><th>Phone</th><th>Language</th><th>Segment</th><th>Outcome</th><th>Replied by</th><th className="num">Attempts</th>{d.questions.length > 0 && <th>Answers</th>}<th><span className="sr-only">Recording</span></th></tr></thead>
                 <tbody>
                   {shown.map(r => (
                     <tr key={r.id}>
                       <td>{r.name}</td><td className="mono muted">{r.phone}</td><td>{r.language}</td>
                       <td className="muted">{r.segment}</td><td><OutcomePill r={r} /></td>
                       <td className="muted">{r.channel ? CHANNEL[r.channel] : "–"}</td><td className="num">{r.attempts}</td>
+                      {d.questions.length > 0 && <td className="muted" title={d.questions.filter(q => r.answers[q.id]).map(q => `${q.label}: ${r.answers[q.id]}`).join(", ")}>
+                        {d.questions.map(q => r.answers[q.id]).filter(Boolean).join(" · ") || "–"}</td>}
                       <td className="num">{r.has_recording && (
                         <button className="btn sm ghost" onClick={() => void play(r)} aria-label={`Play recording for ${r.name}`}>
                           <Icon name="play" size={12} />Play

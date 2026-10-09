@@ -115,9 +115,14 @@ def status() -> dict:
 
 # ---------- sign-in ----------
 
-def start(next_page: str = RETURN_PAGES[0]) -> str:
-    """Authorize URL to open in the browser. Registers a client on the first sign-in."""
+def start(next_page: str = RETURN_PAGES[0], fresh: bool = False) -> str:
+    """Authorize URL to open in the browser. Registers a client on the first sign-in.
+    fresh=True (a new Connect click) drops a registered client that never completed a sign-in: it may be
+    scoped to another workspace (3p_login_workspace_scope_denied), and reusing it would fail forever."""
     d = _load()
+    if fresh and d.get("client_id") and not d.get("sub"):
+        log.info("ChatGPT sign-in: discarding an unfinished client registration")
+        d.pop("client_id")
     if not str(d.get("host_id", "")).startswith("urn:uuid:"):  # OpenAI's example shows a URN-style UUID
         d["host_id"] = f"urn:uuid:{uuid.uuid4()}"
     _save(d)
@@ -308,7 +313,7 @@ class StartReq(BaseModel):
 
 @router.post("/api/auth/chatgpt/start")
 def post_start(body: StartReq | None = None):
-    return {"url": start(body.next if body else RETURN_PAGES[0])}
+    return {"url": start(body.next if body else RETURN_PAGES[0], fresh=True)}
 
 
 @router.post("/api/auth/chatgpt/disconnect")

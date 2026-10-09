@@ -43,6 +43,16 @@ class Script(BaseModel):
     menu: str = Field(min_length=1, max_length=400)
     voicemail: str = Field(min_length=1, max_length=400)
     goodbye: str = Field(min_length=1, max_length=200)
+    questions: dict[str, str] = Field(default_factory=dict)  # spoken text per follow-up question id
+    doubts: str = Field("", max_length=300)  # closing "any other questions?" (campaigns with the assistant)
+
+
+class Question(BaseModel):
+    """A follow-up keypad question after the main 1/2/3 answer; option n is key n."""
+    id: str = Field(pattern=r"^q[1-9]$")
+    label: str = Field(min_length=1, max_length=60)
+    options: list[str] = Field(min_length=llm.MIN_OPTIONS, max_length=llm.MAX_OPTIONS)
+    only_if_confirmed: bool = True
 
 
 class Retry(BaseModel):
@@ -67,6 +77,7 @@ class EstimateReq(BaseModel):
     by_language: dict[str, int]
     scripts: dict[str, Script]
     retry: Retry
+    questions: list[Question] = Field(default_factory=list, max_length=llm.MAX_QUESTIONS)
     escalation: bool
     record: bool
     voice_provider: Literal["piper", "sarvam", "elevenlabs"]
@@ -83,6 +94,7 @@ class CreateReq(BaseModel):
     record: bool
     contacts_csv: str = Field(max_length=1_000_000)
     scripts: dict[str, Script]
+    questions: list[Question] = Field(default_factory=list, max_length=llm.MAX_QUESTIONS)
     retry: Retry
     reviewed: bool
 
@@ -173,7 +185,7 @@ def options():
         # Only providers that can synthesise call audio can launch real calls; any can be simulated.
         "voice_providers": [{"key": k, **v, "available": audio.ready(k)} for k, v in llm.VOICE_PROVIDERS.items()],
         "escalation": {"available": escalation_ready(), "label": "ElevenLabs agent",
-                       "sends": "Callers who press 4: their voice goes to ElevenLabs, USA"},
+                       "sends": "Callers who ask a question at the end: their voice goes to ElevenLabs, USA"},
         "chatgpt": chatgpt.status(),
         "launch_mode": launch_mode(),
         "call_window": os.getenv("CALL_WINDOW", "09:00-20:00"),
@@ -209,7 +221,7 @@ def estimate(body: EstimateReq):
     escalation = body.escalation and escalation_ready()
     return costs.estimate(kind=body.kind, by_language=body.by_language,
                           scripts={l: s.model_dump() for l, s in body.scripts.items()},
-                          max_attempts=body.retry.max_attempts, escalation=escalation,
+                          max_attempts=body.retry.max_attempts, escalation=escalation, questions=len(body.questions),
                           voice=body.voice_provider, text=body.text_provider) | {
         "handling": handling(body.voice_provider, body.text_provider, escalation, body.record)}
 
@@ -218,7 +230,7 @@ def handling(voice: str, text: str, escalation: bool, record: bool) -> dict:
     v = llm.VOICE_PROVIDERS[voice]
     return {
         "audio": {"provider": v["label"], "note": v["sends"]},
-        "text": ({"provider": "ElevenLabs agent", "note": "Only callers who press 4; their voice goes to ElevenLabs, USA"}
+        "text": ({"provider": "ElevenLabs agent", "note": "Only callers who ask a question at the end; their voice goes to ElevenLabs, USA"}
                  if escalation else {"provider": "Keypad only", "note": "No speech is processed"}),
         "recordings": ({"provider": "Exotel", "note": "Stored in India, played back only after unlocking"}
                        if record else {"provider": "Not recorded", "note": "No call audio is kept"}),
@@ -240,6 +252,17 @@ def create(body: CreateReq):
     missing = [LANGUAGES[l] for l in langs if l not in body.scripts]
     if missing:
         raise HTTPException(400, f"Missing scripts for {', '.join(missing)}")
+    ids = [q.id for q in body.questions]
+    if len(set(ids)) != len(ids) or any(not o.strip() for q in body.questions for o in q.options):
+        raise HTTPException(400, "Each question needs its own id and no empty options")
+    unspoken = [f"{LANGUAGES[l]} ({q.label})" for l in langs for q in body.questions
+                if not body.scripts[l].questions.get(q.id, "").strip()]
+    if unspoken:
+        raise HTTPException(400, f"Write the spoken question for {', '.join(unspoken[:3])}")
+    if body.escalation and escalation_ready():
+        silent = [LANGUAGES[l] for l in langs if not body.scripts[l].doubts.strip()]
+        if silent:
+            raise HTTPException(400, f"Write the closing question (any other questions?) for {', '.join(silent)}")
     rows, errors = parse_contacts(body.contacts_csv, langs)
     if errors:
         raise HTTPException(400, f"Fix {len(errors)} contact row(s) first (line {errors[0]['line']}: {errors[0]['error']})")
@@ -257,7 +280,9 @@ def create(body: CreateReq):
         "languages": langs, "segments": list(dict.fromkeys(r["segment"] for r in rows)), "started_at": now_iso(),
         "handling": handling(body.voice_provider, body.text_provider, escalation, body.record),
         "event": body.event.model_dump(),
-        "scripts": {l: body.scripts[l].model_dump() for l in langs}, "retry": body.retry.model_dump(),
+        "scripts": {l: body.scripts[l].model_dump() | {"questions": {q.id: body.scripts[l].questions[q.id] for q in body.questions}}
+                    for l in langs},
+        "questions": [q.model_dump() for q in body.questions], "retry": body.retry.model_dump(),
         "record": int(body.record), "escalation": int(escalation), "simulated": int(mode == "simulated"),
     }
     recs = [{

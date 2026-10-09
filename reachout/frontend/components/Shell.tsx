@@ -4,11 +4,12 @@ import { usePathname } from "next/navigation";
 import {
   createContext, Fragment, useCallback, useContext, useEffect, useRef, useState, type ReactNode,
 } from "react";
+import { AssistantChat } from "./AssistantChat";
 import { Icon, type IconName } from "./Icon";
 
 type Crumb = [label: string, href?: string];
 type ToastKind = "ok" | "error" | "info";
-interface ModalSpec { title: string; body: ReactNode; confirmLabel: string; onConfirm: () => Promise<void> }
+interface ModalSpec { title: string; body: ReactNode; confirmLabel: string; onConfirm: () => Promise<void>; danger?: boolean }
 
 interface Ctx {
   setCrumbs: (c: Crumb[]) => void;
@@ -72,7 +73,7 @@ function ModalView({ spec, onClose }: { spec: ModalSpec; onClose: () => void }) 
         <div className="modal-body">{spec.body}</div>
         <div className="modal-actions">
           <button className="btn" onClick={close}>Cancel</button>
-          <button className="btn primary" ref={okRef} disabled={busy} onClick={confirm}>
+          <button className={spec.danger ? "btn danger solid" : "btn primary"} ref={okRef} disabled={busy} onClick={confirm}>
             {busy ? <><span className="spinner" />Working</> : spec.confirmLabel}
           </button>
         </div>
@@ -147,6 +148,7 @@ export function Shell({ children }: { children: ReactNode }) {
           {children}
         </div>
       </div>
+      <AssistantChat />
 
       <div id="toasts" role="status" aria-live="polite">
         {toasts.map(t => (
