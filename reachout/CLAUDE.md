@@ -133,6 +133,18 @@ reminders). Telephony was Exotel; it was removed for now (2026-10-09, on request
     replay), preview/synthesise/listen via the API. Not verified: a hybrid call end to end with a person, the hybrid agent
     takeover, Gemini IVR for a campaign with many names (quota).
 
+- Campaign agent (`backend/campaignagent.py`, `POST /api/assistant/agent`, dock chat `frontend/components/AssistantChat.tsx`):
+  the same chat bar is the dashboard assistant (scope "create"), the builder agent ("builder") and a campaign's agent
+  ("campaign", chosen by URL). Every turn the model gets the campaign's full current state + a summary of the older chat + the
+  last `WINDOW` turns, and returns `{reply, edits, actions}`; `campaignagent.clean` whitelists and clamps it. Builder: the
+  browser applies edits to the form through `lib/agentbridge.ts` (the builder page registers a bridge; actions: `redraft`).
+  Campaign: the server applies them through `edit_campaign` (so only while paused/finished; actions `pause`,
+  `resynthesize`; event, name, provider, mode, retry, system prompt, scripts) and saves the chat on the campaign
+  (`chat`, `chat_summary`; oldest turns are folded into the summary after `SUMMARISE_AT`). The create-scope chat is carried
+  to the builder (sessionStorage `reachout.chat`) and saved on the campaign at creation (`CreateReq.chat`), so the agent on
+  the campaign page continues it. Contacts, languages and questions of a created campaign stay fixed.
+  Verified via the API (builder + campaign scopes, memory across turns); the UI wiring is type-checked but not clicked through.
+
 ## Roadmap
 
 - [~] Phase 1 (code written, untested against real Exotel: needs credentials, Cloudflare Tunnel, a flow with the voicebot applet): Exotel skeleton. Outbound call via API to a test number, voicebot/stream applet to

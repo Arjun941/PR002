@@ -500,3 +500,27 @@ tr.clickable.on td { background: var(--accent-soft); }
 .recipient-detail td { background: var(--panel-2); white-space: normal; }
 .recipient-detail .facts { margin: 8px 0 0; max-width: 720px; }
 .recipient-detail .facts dd { text-align: left; }
+
+.bubble .applied { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.bubble .applied .chip { font-size: 11px; }
+
+/* campaign agent on a campaign page: a collapsible tab on the right */
+.side-tab {
+  position: fixed; right: 0; top: 42%; z-index: 30; writing-mode: vertical-rl; display: flex; align-items: center; gap: 8px;
+  padding: 14px 8px; border: 1px solid var(--line-2); border-right: 0; border-radius: 10px 0 0 10px;
+  background: var(--panel-2); color: var(--text); font: inherit; font-size: 13px; cursor: pointer; transition: right .2s var(--ease);
+}
+.side-tab .ic { color: var(--accent); transform: rotate(90deg); }
+.side-tab.open { right: min(400px, 100vw); }
+.side-panel {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 31; width: min(400px, 100vw); display: flex; flex-direction: column;
+  background: var(--panel); border-left: 1px solid var(--line-2); box-shadow: -12px 0 40px rgba(0, 0, 0, .4);
+  animation: side-in .2s var(--ease);
+}
+@keyframes side-in { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
+.side-panel .dock-head { padding-top: 14px; padding-bottom: 14px; }
+.side-panel .chat-log { flex: 1 1 auto; max-height: none; }
+.side-bar { display: flex; align-items: center; gap: 6px; padding: 10px; border-top: 1px solid var(--line); }
+.side-bar .input { flex: 1; min-width: 0; }
+@media (min-width: 1280px) { body.agent-open .view { margin-right: 416px; margin-left: 24px; } }
+@media (max-width: 860px) { .side-tab.open { display: none; } }

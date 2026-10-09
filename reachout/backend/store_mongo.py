@@ -24,7 +24,7 @@ from .dbcommon import ANSWERED, BOOL_FIELDS, ago, now_iso
 
 _CAMPAIGN_DEFAULTS = {"voice": "", "audio_ready": False, "note": None, "questions": [], "sim": {},
                       "event": {}, "scripts": {}, "retry": {}, "segments": [], "languages": [],
-                      "agent_provider": "elevenlabs", "provider": "", "telephony": "webphone", "system_prompt": "", "mode": "live"}
+                      "agent_provider": "elevenlabs", "provider": "", "telephony": "webphone", "system_prompt": "", "mode": "live", "chat": [], "chat_summary": ""}
 _QID = re.compile(r"[\w-]+")  # becomes part of a field path, so no dots or operators
 _DUE_RETRY = ("voicemail", "no_answer")
 

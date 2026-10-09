@@ -49,14 +49,15 @@ CREATE TABLE IF NOT EXISTS access_log (
   id INTEGER PRIMARY KEY, at TEXT NOT NULL, action TEXT NOT NULL, target TEXT, client TEXT
 );
 """
-_JSON = ("languages", "segments", "handling", "event", "scripts", "retry", "sim", "questions")
+_JSON = ("languages", "segments", "handling", "event", "scripts", "retry", "sim", "questions", "chat")
 # Columns added after the first release; init() adds them to older databases.
 _ADDED = {"campaigns": [("voice", "TEXT NOT NULL DEFAULT ''"), ("audio_ready", "INTEGER NOT NULL DEFAULT 0"),
                         ("note", "TEXT"), ("questions", "TEXT NOT NULL DEFAULT '[]'"),
                         ("agent_provider", "TEXT NOT NULL DEFAULT 'elevenlabs'"),
                         ("provider", "TEXT NOT NULL DEFAULT ''"), ("telephony", "TEXT NOT NULL DEFAULT 'exotel'"),
                         ("system_prompt", "TEXT NOT NULL DEFAULT ''"),
-                        ("mode", "TEXT NOT NULL DEFAULT 'live'")],
+                        ("mode", "TEXT NOT NULL DEFAULT 'live'"), ("chat", "TEXT NOT NULL DEFAULT '[]'"),
+                        ("chat_summary", "TEXT NOT NULL DEFAULT ''")],
           "recipients": [("answers", "TEXT NOT NULL DEFAULT '{}'")]}
 _DUE = ("campaign_id = ? AND in_flight = 0 AND (outcome = 'pending' "
         "OR (outcome IN ('voicemail', 'no_answer') AND attempts < ? AND last_attempt_at <= ?))")

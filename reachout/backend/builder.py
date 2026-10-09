@@ -80,6 +80,13 @@ class Question(BaseModel):
     only_if_confirmed: bool = True
 
 
+class ChatTurnIn(BaseModel):
+    """One turn of the campaign agent's chat (kept on the campaign). `applied` names the fields the agent changed."""
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=2000)
+    applied: list[str] = Field(default_factory=list, max_length=20)
+
+
 class Retry(BaseModel):
     max_attempts: int = Field(ge=1, le=4)
     gap_hours: int = Field(ge=1, le=48)
@@ -114,6 +121,7 @@ class CreateReq(BaseModel):
     provider: Provider
     mode: Mode
     system_prompt: str = Field("", max_length=MAX_PROMPT)
+    chat: list[ChatTurnIn] = Field(default_factory=list, max_length=200)  # the agent chat that built it, carried over
     contacts_csv: str = Field(max_length=1_000_000)
     scripts: dict[str, Script]
     questions: list[Question] = Field(default_factory=list, max_length=llm.MAX_QUESTIONS)
@@ -364,6 +372,7 @@ def create(body: CreateReq):
         "questions": [q.model_dump() for q in body.questions], "retry": body.retry.model_dump(),
         "record": 0, "escalation": int(hybrid), "agent_provider": body.provider,
         "provider": body.provider, "mode": body.mode, "telephony": "webphone", "system_prompt": prompt, "simulated": 0,
+        "chat": [t.model_dump() for t in body.chat], "chat_summary": "",
     }
     recs = [{
         "id": f"{cid}-{i}", "campaign_id": cid, "name": r["name"], "phone": r["phone"], "language": r["language"],

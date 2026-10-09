@@ -5,11 +5,12 @@ import { api, post } from "@/lib/api";
 import { fmt, KIND } from "@/lib/format";
 import {
   PREFILL_KEY, SCRIPT_FIELDS, questionText, type Prefill, type Question, type BuilderOptions, type ContactsCheck, type Draft, type Estimate, type EventDetails,
-  type Mode, type ProviderKey, type Script,
+  type AgentEdits, type Mode, type ProviderKey, type Script,
 } from "@/lib/types";
 import { useData } from "@/components/hooks";
 import { Icon } from "@/components/Icon";
 import { Listen } from "@/components/Listen";
+import { clearChat, loadChat, registerBuilder, type BuilderBridge } from "@/lib/agentbridge";
 import { useCrumbs, useShell } from "@/components/Shell";
 import { QuestionsEditor } from "@/components/QuestionsEditor";
 import { ErrorView, HandlingCard, Notice, PageHead, Skeleton } from "@/components/ui";
@@ -80,6 +81,12 @@ export default function NewCampaignPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The campaign agent (the dock chat) reads and edits this form through a bridge, kept pointing at the latest closures.
+  const bridge = useRef<BuilderBridge | null>(null);
+  useEffect(() => registerBuilder({
+    snapshot: () => bridge.current?.snapshot() ?? {}, apply: (e, a) => bridge.current?.apply(e, a) ?? [],
+  }), []);
+
   const draftKey = JSON.stringify([ev, langs, mode]);
   const contactsKey = JSON.stringify([csv, langs]);
   const d = draft?.d;
@@ -146,14 +153,15 @@ export default function NewCampaignPage() {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider, language, text }),
   });
 
-  const makeDraft = async () => {
+  const makeDraft = async (o?: { ev: EventDetails; langs: string[]; mode: Mode; provider: string }) => {
+    const use = o ?? { ev, langs, mode, provider };
     setBusy("draft");
     try {
       const r = await post<{ draft: Draft; warnings: string[] }>("/builder/draft",
-        { event: ev, languages: langs, provider, mode });
-      setDraft({ key: draftKey, d: r.draft, warnings: r.warnings });
+        { event: use.ev, languages: use.langs, provider: use.provider, mode: use.mode });
+      setDraft({ key: JSON.stringify([use.ev, use.langs, use.mode]), d: r.draft, warnings: r.warnings });
       setName(r.draft.name);
-      setTab(langs[0]);
+      setTab(use.langs[0]);
       setReviewed(false);
     } catch (e) { toast((e as Error).message, "error"); }
     finally { setBusy(""); }
@@ -182,6 +190,50 @@ export default function NewCampaignPage() {
   const editRetry = (k: "max_attempts" | "gap_hours", v: number) => setDraft(p => p && {
     ...p, d: { ...p.d, retry: { ...p.d.retry, [k]: v } },
   });
+
+  bridge.current = {
+    snapshot: () => ({
+      step: STEPS[step], event: ev, languages: langs, provider, mode, name,
+      providers: opts.providers.map(p => ({ key: p.key, label: p.label, live_ready: p.caps.live.ready, ivr_audio_ready: p.caps.voice.ready })),
+      phones_online: opts.phones, has_draft: !!d,
+      retry: d?.retry ?? null, system_prompt: d?.system_prompt ?? null,
+      scripts: d ? Object.fromEntries(langs.filter(l => d.scripts[l]).map(l => [l, {
+        ...Object.fromEntries(SCRIPT_FIELDS.map(f => [f, d.scripts[l][f]])), doubts: d.scripts[l].doubts ?? "", questions: d.scripts[l].questions ?? {} }])) : null,
+      questions: d?.questions ?? [],
+      contacts: contacts ? { count: contacts.count, by_language: contacts.by_language, segments: contacts.segments } : null,
+      estimate_total_inr: estimate?.total_inr ?? null, draft_notes: d?.notes || null,
+    }),
+    apply: (e: AgentEdits, actions: string[]) => {
+      const done: string[] = [];
+      const nev = e.event ? { ...ev, ...e.event } as EventDetails : ev;
+      const nl = e.languages ?? langs, nm = e.mode ?? mode, np = e.provider ?? provider;
+      if (e.event) { setEv(nev); done.push("event"); }
+      if (e.languages) { setLangs(nl); setTab(nl[0]); done.push("languages"); }
+      if (e.provider) { setProvider(np); done.push("provider"); }
+      if (e.mode) { setMode(nm); done.push("mode"); }
+      if (e.name) { setName(e.name); done.push("name"); }
+      if (d) {
+        if (e.questions) { setQuestions(e.questions); done.push("questions"); }
+        if (e.retry) { setDraft(p => p && { ...p, d: { ...p.d, retry: e.retry! } }); done.push("retry"); }
+        if (e.system_prompt) { editPrompt(e.system_prompt); done.push("system prompt"); }
+        if (e.scripts) {
+          setDraft(p => p && { ...p, d: { ...p.d, scripts: Object.fromEntries(Object.entries(p.d.scripts).map(([l, sc]) => {
+            const part = e.scripts?.[l];
+            if (!part) return [l, sc];
+            const { questions: qs, ...fields } = part;
+            return [l, { ...sc, ...fields, questions: { ...sc.questions, ...(qs ?? {}) }, placeholder: false }];
+          })) } });
+          done.push("scripts");
+        }
+      }
+      if (actions.includes("redraft")) { void makeDraft({ ev: nev, langs: nl, mode: nm, provider: np }); done.push("redraft"); }
+      else if (d && e.scripts && (e.event || e.languages || e.mode)) {
+        // The agent rewrote the scripts together with the event, so the draft still matches it.
+        setDraft(p => p && { ...p, key: JSON.stringify([nev, nl, nm]) });
+      }
+      return done;
+    },
+  };
 
   const next = async () => {
     if (step === 1 && !contacts) {
@@ -216,8 +268,9 @@ export default function NewCampaignPage() {
       onConfirm: async () => {
         const r = await post<{ id: string; mode: string }>("/campaigns", {
           name: name.trim(), event: ev, languages: langs, provider, mode, system_prompt: d.system_prompt,
-          contacts_csv: csv, scripts: scriptsBody, questions, retry: d.retry, reviewed,
+          contacts_csv: csv, scripts: scriptsBody, questions, retry: d.retry, reviewed, chat: loadChat(),
         });
+        clearChat();  // the agent chat now lives on the campaign
         toast(hybrid ? "Campaign created: making the IVR audio" : "Campaign launched");
         router.push(`/campaigns/${r.id}`);
       },

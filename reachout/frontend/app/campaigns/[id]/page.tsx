@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Fragment, use, useRef, useState } from "react";
+import { Fragment, use, useEffect, useRef, useState } from "react";
 import { api, post } from "@/lib/api";
 import { ago, CHANNEL, fmt, KIND, ORDER, OUT } from "@/lib/format";
 import { SCRIPT_FIELDS, type Detail, type Recipient } from "@/lib/types";
@@ -115,6 +115,13 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
 
   useCrumbs([["Campaigns", "/campaigns"], [d?.name ?? "Campaign"]]);
   const refresh = async () => { try { setData(await api<Detail>(`/campaigns/${id}`)); } catch { /* keep last good view */ } };
+  // The campaign agent edits this campaign from the dock chat: show the change as soon as it is made.
+  useEffect(() => {
+    const on = () => { void refresh(); };
+    window.addEventListener("reachout:campaign-changed", on);
+    return () => window.removeEventListener("reachout:campaign-changed", on);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
   usePoll(refresh, 2500, !!d && (d.status === "running" || d.status === "preparing" || d.synthesising || d.totals.retrying > 0));
 
   if (error !== null) return <main className="view"><ErrorView status={error} retry={retry} /></main>;

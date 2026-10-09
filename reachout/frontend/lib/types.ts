@@ -86,6 +86,16 @@ export interface BuilderOptions {
 }
 export interface ChatGPTStatus { connected: boolean; email: string | null; redirect_uri: string }
 export const PREFILL_KEY = "reachout.prefill";
+export const CHAT_KEY = "reachout.chat";
+/** One turn of the campaign agent's chat; `applied` names what the agent changed with that reply. */
+export interface ChatTurn { role: "user" | "assistant"; content: string; applied?: string[] }
+type ScriptEdit = Partial<Record<(typeof SCRIPT_FIELDS)[number] | "doubts", string>> & { questions?: Record<string, string> };
+/** Edits the agent proposes (the builder form applies them; for a campaign the server already did). */
+export interface AgentEdits {
+  name?: string; provider?: ProviderKey; mode?: Mode; system_prompt?: string; retry?: RetryPolicy;
+  event?: Partial<EventDetails>; languages?: string[]; questions?: Question[]; scripts?: Record<string, ScriptEdit>;
+}
+export interface AgentReply { reply: string; edits: AgentEdits; actions: string[]; applied?: string[]; errors: string[]; warnings: string[] }
 export interface AssistantReply {
   reply: string; ready: boolean; event: EventDetails | null; languages: string[]; language_names: string[];
   missing: { key: string; label: string }[]; suggested: ("kind" | "title" | "details")[]; provider: string; provider_key: string; warnings: string[];

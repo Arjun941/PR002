@@ -18,8 +18,8 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from . import assistant, audio, demo, dialer, store, stt
-from . import catalog, chatgpt, llm, recstore
-from .builder import DEMO, MAX_PROMPT, Question, Retry, Script, handling, router as builder_router
+from . import callctx, campaignagent, catalog, chatgpt, llm, recstore
+from .builder import DEMO, MAX_PROMPT, ChatTurnIn, Event, Question, Retry, Script, handling, router as builder_router
 from .costs import RETRY_ESTIMATE_PER_CALL, recipient_cost
 from .providers import router as providers_router
 from .history import latest_by_recipient, router as history_router
@@ -203,6 +203,7 @@ class CampaignEdit(BaseModel):
     retry: Retry | None = None
     scripts: dict[str, Script] | None = None
     questions: list[Question] | None = None  # every question the campaign should have: the existing ones unchanged, plus new ones
+    event: dict | None = None  # the event facts to change (merged into the current ones)
 
 
 @app.patch("/api/campaigns/{cid}")
@@ -223,6 +224,13 @@ def edit_campaign(cid: str, body: CampaignEdit):
         changes["system_prompt"] = body.system_prompt.strip()
     if body.retry is not None:
         changes["retry"] = body.retry.model_dump()
+    if body.event:
+        try:
+            ev = Event(**((c["event"] or {}) | {k: v for k, v in body.event.items() if k in Event.model_fields})).model_dump()
+        except Exception as exc:
+            raise HTTPException(400, f"Event details are not valid: {str(exc)[:120]}")
+        if ev != c["event"]:
+            changes["event"] = ev
     if body.provider is not None and body.provider != provider:
         provider = body.provider
         changes |= {"provider": provider, "agent_provider": provider}
@@ -275,6 +283,102 @@ def edit_campaign(cid: str, body: CampaignEdit):
     if changes:
         store.update_campaign(cid, changes)
     return {"updated": sorted(changes)}
+
+
+# ---------- campaign agent ----------
+
+def _agent_state(cid: str) -> dict:
+    """Everything the campaign agent is told about an existing campaign, on every turn."""
+    d = campaign_detail(cid)
+    c = _get(cid)
+    return {
+        "name": d["name"], "status": d["status"], "mode": c["mode"], "provider": d["provider"], "languages": c["languages"],
+        "event": c["event"], "retry": d["retry_policy"], "system_prompt": c["system_prompt"],
+        "scripts": {l: {k: v for k, v in s.items() if k in (*campaignagent.SCRIPT_FIELDS, "questions")} for l, s in c["scripts"].items()},
+        "questions": [{"id": q["id"], "label": q["label"], "options": q["options"], "only_if_confirmed": q["only_if_confirmed"],
+                       "answered": q["answered"], "results": q["results"]} for q in d["questions"]],
+        "results": {"recipients": d["totals"]["recipients"], "calls_placed": d["totals"]["calls_placed"],
+                    "answered": d["totals"]["answered"], "confirm_rate": d["totals"]["confirm_rate"], "counts": d["totals"]["counts"],
+                    "cost_inr": d["totals"]["cost_inr"]},
+        "note": d["note"], "ivr_audio_ready": bool(c["audio_ready"]),
+    }
+
+
+class AgentReq(BaseModel):
+    scope: Literal["builder", "campaign"]
+    campaign_id: str | None = None
+    message: str | None = Field(None, max_length=2000)            # campaign: the new user message
+    messages: list[ChatTurnIn] = Field(default_factory=list, max_length=200)  # builder: the chat so far, new message last
+    state: dict | None = None                                      # builder: the form as it is now
+
+
+@app.get("/api/campaigns/{cid}/chat")
+def campaign_chat(cid: str):
+    c = _get(cid)
+    return {"messages": c["chat"], "summary": c["chat_summary"]}
+
+
+@app.post("/api/assistant/agent")
+def campaign_agent(body: AgentReq):
+    """One turn with the campaign agent. In the builder it only proposes edits (the form applies them); on a campaign
+    it applies them through the Edit page's validation and saves the chat on the campaign."""
+    if body.scope == "builder":
+        if not body.messages or body.messages[-1].role != "user":
+            raise HTTPException(400, "The last message must be from the user")
+        history = [t.model_dump() for t in body.messages]
+        try:
+            reply, edits, actions, warnings = campaignagent.turn("builder", body.state or {}, "", history)
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc))
+        return {"reply": reply, "edits": edits, "actions": actions, "errors": [], "warnings": warnings}
+
+    if not body.campaign_id or not body.message or not body.message.strip():
+        raise HTTPException(400, "A campaign and a message are needed")
+    cid = body.campaign_id
+    c = _get(cid)
+    history = [*c["chat"], {"role": "user", "content": body.message.strip()}]
+    try:
+        reply, edits, actions, warnings = campaignagent.turn("campaign", _agent_state(cid), c["chat_summary"], history)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+    applied, errors = [], []
+    if "pause" in actions and c["status"] in ("running", "preparing"):
+        store.set_status(cid, "paused")
+        applied.append("paused")
+    if edits:
+        cur = c["scripts"]
+        scripts = None
+        if "scripts" in edits:
+            scripts = {}
+            for l, sc in cur.items():
+                part = edits["scripts"].get(l, {})
+                texts = (sc.get("questions") or {}) | part.get("questions", {})
+                scripts[l] = {k: v for k, v in sc.items() if k != "questions"} | {k: v for k, v in part.items() if k != "questions"} | {"questions": texts}
+        try:
+            payload = CampaignEdit(
+                name=edits.get("name"), provider=edits.get("provider"), mode=edits.get("mode"),
+                system_prompt=edits.get("system_prompt"), retry=edits.get("retry"), event=edits.get("event"),
+                scripts={l: Script(**sc) for l, sc in scripts.items()} if scripts else None)
+            applied += edit_campaign(cid, payload)["updated"]
+        except HTTPException as exc:
+            errors.append(str(exc.detail))
+        except Exception as exc:
+            errors.append(f"The change was not valid ({type(exc).__name__}).")
+    if "resynthesize" in actions:
+        fresh = _get(cid)
+        if fresh["mode"] == "hybrid" and fresh["status"] != "preparing" and audio.choose_voice(fresh):
+            if audio.start(cid, True):
+                applied.append("ivr audio")
+    if errors:
+        reply += "\n\nI could not apply that: " + " ".join(errors)
+    turns = [*c["chat"], {"role": "user", "content": body.message.strip(), "applied": []},
+             {"role": "assistant", "content": reply[:2000], "applied": applied}]
+    summary = c["chat_summary"]
+    if len(turns) > campaignagent.SUMMARISE_AT:
+        summary = campaignagent.fold(summary, turns[:campaignagent.SUMMARISE_N])
+        turns = turns[campaignagent.SUMMARISE_N:]
+    store.update_campaign(cid, {"chat": turns, "chat_summary": summary})
+    return {"reply": reply, "edits": edits, "actions": actions, "applied": applied, "errors": errors, "warnings": warnings}
 
 
 @app.delete("/api/campaigns/{cid}")
