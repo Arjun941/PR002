@@ -27,6 +27,7 @@ import array
 import secrets
 import struct
 import time
+from collections import deque
 from pathlib import Path
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -44,7 +45,9 @@ RING_SECONDS = int(os.getenv("WEBPHONE_RING_SECONDS", "30"))
 MAX_SECONDS = int(os.getenv("WEBPHONE_MAX_SECONDS", "300"))  # cost cap per call
 OUTCOMES = ("confirmed", "declined", "rescheduled")
 NOTICE_IDLE = float(os.getenv("NOTICE_IDLE_SECONDS", "8"))  # a reminder ends this long after the agent finishes, if the person has nothing to say
-GATE_RMS = int(os.getenv("WEBPHONE_GATE_RMS", "450"))      # quietest level (16-bit RMS) that counts as speech
+GATE_RMS = int(os.getenv("WEBPHONE_GATE_RMS", "600"))      # quietest level (16-bit RMS) that counts as speech
+GATE_ONSET = int(os.getenv("WEBPHONE_GATE_ONSET_MS", "100"))        # loud this long (ms) before the gate opens
+GATE_ONSET_AGENT = int(os.getenv("WEBPHONE_GATE_ONSET_AGENT_MS", "240"))  # the same while the agent is talking (interrupting it)
 GATE_HANG = float(os.getenv("WEBPHONE_GATE_HANG", "0.35"))  # keep the gate open this long after speech
 
 
@@ -129,23 +132,42 @@ def _rms(pcm: bytes) -> float:
 
 
 class Gate:
-    """Noise gate on the caller's microphone. Background noise and the phone's own speaker leaking into the mic
-    are replaced by silence, so the provider does not hear a "caller" and cut the agent off. The bar follows the
-    room's noise level and is higher while the agent is talking (echo), so only clear speech interrupts it."""
+    """Noise gate on the caller's microphone. Background noise and the phone's own speaker leaking into the mic are replaced by
+    silence, so the provider does not hear a "caller" and cut the agent off.
+
+    Sound must be loud enough (the bar follows the room's noise level, and is much higher while the agent is talking, because of
+    echo) AND last: a door, a clap or a cough is a short burst, speech keeps going. So the gate opens only after ONSET of continuous
+    loud audio (longer while the agent is talking, so only a real interruption cuts it off). When it opens, the frames that led up
+    to it are released with it, so the start of the first word is not lost. It then stays open for GATE_HANG after the last loud
+    frame, which carries quiet syllables and short pauses."""
 
     def __init__(self):
         self.floor, self.open_until, self.last_voice = 100.0, 0.0, 0.0  # last_voice: the last time someone spoke over silence
+        self.run = 0                                                   # consecutive loud frames so far
+        self.pre: deque[bytes] = deque(maxlen=12)                      # recent frames, released when the gate opens
 
     def __call__(self, pcm: bytes, agent_talking: bool) -> bytes:
         now, level = time.monotonic(), _rms(pcm)
-        bar = max(GATE_RMS, self.floor * 3) * (2.2 if agent_talking else 1.0)
-        if level >= bar:
+        bar = max(GATE_RMS, self.floor * 3.5) * (2.5 if agent_talking else 1.0)
+        loud = level >= bar
+        self.run = self.run + 1 if loud else 0
+        was_open = now <= self.open_until
+        need = max(1, round((GATE_ONSET_AGENT if agent_talking else GATE_ONSET) / 20))  # frames are 20 ms
+        if loud and (was_open or self.run >= need):
             self.open_until = now + GATE_HANG
             if not agent_talking:
                 self.last_voice = now
-        elif now > self.open_until:
+            if was_open:
+                return pcm
+            lead = b"".join(self.pre)
+            self.pre.clear()
+            return lead + pcm
+        if was_open:
+            return pcm
+        if not loud:
             self.floor = 0.97 * self.floor + 0.03 * min(level, 1500)
-        return pcm if now <= self.open_until else bytes(len(pcm))
+        self.pre.append(pcm)
+        return bytes(len(pcm))
 
 
 async def call(c: dict, r: dict, phone: Phone) -> None:
